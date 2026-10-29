@@ -1,54 +1,62 @@
-// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro con Auto-Escaneo de Bandeja
+// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
+// Extrae exclusivamente la línea "Submotivo: ..." del mensaje del técnico
 (function () {
   'use strict';
 
-  // Base fija de mensaje para técnicos
   const BASE_GREETING = "Hola Técnico, Procederemos con la atención";
 
-  // Mapeo de Submotivos y sus respuestas oficiales
+  // Mapeo oficial de Submotivos (se evalúa SOLO sobre el valor de "Submotivo:")
   const SUBMOTIVO_MAP = [
     {
-      id: "activaciones",
-      name: "Activaciones",
-      keywords: ["activaciones", "activacion", "activar"],
-      reply: `${BASE_GREETING}, enviar error de toa`
-    },
-    {
       id: "reenvio",
-      name: "Reenvío",
-      keywords: ["reenvio", "reenvío"],
+      name: "Reenvío de señal",
+      keywords: ["reenvio"],
       reply: `${BASE_GREETING}, enviar captura de reenvio desde su toa`
     },
     {
       id: "cintillos",
       name: "Consulta de Cintillos",
-      keywords: ["cintillos", "cintillo", "consulta de cintillos", "fat", "tap"],
+      keywords: ["cintillo", "fat", "tap"],
       reply: `${BASE_GREETING}, enviar cintillos y foto del fat/tap`
     },
     {
       id: "mesh",
       name: "Registro Mesh",
-      keywords: ["registro mesh", "mesh", "repetidor"],
+      keywords: ["mesh", "repetidor"],
       reply: `${BASE_GREETING}, enviar repetidor a activar`
     },
     {
       id: "manto",
       name: "SOT de Manto",
-      keywords: ["sot de manto", "manto", "sot manto"],
+      keywords: ["manto", "mantenimiento"],
       reply: `${BASE_GREETING}, ¿cuál es el motivo de la sot de manto?`
     },
     {
       id: "pext",
       name: "Derivación a PEXT",
-      keywords: ["derivacion a pext", "derivación a pext", "pext", "derivacion pext"],
+      keywords: ["pext", "derivacion", "planta externa"],
       reply: `${BASE_GREETING}, enviar evidencias y motivo de la derivacion`
+    },
+    {
+      id: "activaciones",
+      name: "Activaciones",
+      keywords: ["activacion", "activar"],
+      reply: `${BASE_GREETING}, enviar error de toa`
     }
   ];
+
+  // Quitar tildes y pasar a minúsculas para comparar sin errores
+  function normalizeText(str) {
+    return (str || '')
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim();
+  }
 
   // Estado del escáner continuo de tickets
   let isScanningQueue = false;
   let scannerLoopTimeout = null;
-  const processedTicketIds = new Set();
   let currentTicketIndex = 0;
 
   // Localizar campo de entrada en Laraigo
@@ -80,7 +88,9 @@
 
   // Localizar botón de enviar
   function findSendButton(inputContext) {
-    const container = inputContext ? inputContext.closest('form, div[class*="footer"], div[class*="input"], div[class*="chat"]') || document : document;
+    const container = inputContext
+      ? inputContext.closest('form, div[class*="footer"], div[class*="input"], div[class*="chat"]') || document
+      : document;
 
     const submitBtn = container.querySelector('button[type="submit"]');
     if (submitBtn && submitBtn.offsetParent !== null && !submitBtn.disabled) return submitBtn;
@@ -179,47 +189,65 @@
     return true;
   }
 
-  // ==========================================
-  // DETECCIÓN INTELIGENTE DEL SUBMOTIVO
-  // ==========================================
+  // ==============================================================
+  // EXTRACCIÓN ESTRICTA DE "Submotivo: ..." DEL MENSAJE DEL TÉCNICO
+  // ==============================================================
+  function extractSubmotivoFromText(rawText) {
+    if (!rawText) return null;
+
+    // Busca específicamente la línea "Submotivo: <valor>" ignorando "Tipo:" o "Motivo:"
+    const regex = /submotivo\s*:\s*([^\r\n]+)/i;
+    const match = rawText.match(regex);
+    if (!match || !match[1]) return null;
+
+    const rawSubmotivoValue = match[1].trim();
+    const normalizedValue = normalizeText(rawSubmotivoValue);
+
+    if (!normalizedValue || normalizedValue === 'null') return null;
+
+    // Extraer opcionalmente SOT para mostrar en el widget
+    const sotMatch = rawText.match(/SOT\s+(\d+)/i);
+    const sotNumber = sotMatch ? sotMatch[1] : null;
+
+    for (const rule of SUBMOTIVO_MAP) {
+      if (rule.keywords.some(kw => normalizedValue.includes(normalizeText(kw)))) {
+        return {
+          rule,
+          rawSubmotivo: rawSubmotivoValue,
+          sot: sotNumber
+        };
+      }
+    }
+
+    return {
+      rule: null,
+      rawSubmotivo: rawSubmotivoValue,
+      sot: sotNumber
+    };
+  }
+
   function scanScreenForSubmotivo() {
-    // 1. Buscar en campos laterales de información del ticket (labels "Submotivo", "Motivo", etc.)
-    const allElements = document.querySelectorAll('div, span, p, td, label, b, strong');
-    for (const el of allElements) {
-      const text = el.innerText ? el.innerText.toLowerCase().trim() : '';
-      if (text.startsWith('submotivo') || text.includes('submotivo:')) {
-        const fullContext = (el.innerText + ' ' + (el.nextElementSibling ? el.nextElementSibling.innerText : '')).toLowerCase();
-        for (const item of SUBMOTIVO_MAP) {
-          if (item.keywords.some(kw => fullContext.includes(kw))) {
-            return item;
-          }
-        }
-      }
-    }
-
-    // 2. Buscar en mensajes del chat
-    const messageNodes = document.querySelectorAll(
-      '[class*="message"], [class*="bubble"], [class*="chat-item"], .message-received, .msg-incoming'
+    // 1. Buscar en los mensajes del chat el bloque que contiene "Submotivo:"
+    const candidateNodes = document.querySelectorAll(
+      '[class*="message"], [class*="bubble"], [class*="chat"], p, div, span'
     );
-    const limit = Math.min(messageNodes.length, 6);
-    for (let i = 0; i < limit; i++) {
-      const msgText = (messageNodes[i].innerText || '').toLowerCase();
-      for (const item of SUBMOTIVO_MAP) {
-        if (item.keywords.some(kw => msgText.includes(kw))) {
-          return item;
+
+    for (const node of candidateNodes) {
+      if (node.offsetParent === null) continue;
+      const text = node.innerText || '';
+      if (/submotivo\s*:/i.test(text)) {
+        const result = extractSubmotivoFromText(text);
+        if (result && result.rule) {
+          return result;
         }
       }
     }
 
-    // 3. Buscar en badges o etiquetas superiores del chat
-    const headerBadges = document.querySelectorAll('header, [class*="header"], [class*="tag"], [class*="badge"]');
-    for (const badge of headerBadges) {
-      const bText = (badge.innerText || '').toLowerCase();
-      for (const item of SUBMOTIVO_MAP) {
-        if (item.keywords.some(kw => bText.includes(kw))) {
-          return item;
-        }
-      }
+    // Fallback: escanear el texto completo del body si está fragmentado
+    const bodyText = document.body.innerText || '';
+    if (/submotivo\s*:/i.test(bodyText)) {
+      const result = extractSubmotivoFromText(bodyText);
+      if (result) return result;
     }
 
     return null;
@@ -229,16 +257,17 @@
   // COMPROBAR SI EL CHAT ACTUAL YA TIENE RESPUESTA
   // ==========================================
   function doesCurrentChatAlreadyHaveResponse() {
-    // Buscar mensajes salientes (enviados por el asesor)
-    // En Laraigo suelen tener clase tipo 'outgoing', 'sent', 'bubble-right', 'self', etc.
-    const allMessages = Array.from(document.querySelectorAll(
+    const bodyText = normalizeText(document.body.innerText || '');
+    // Evitar contar el texto de nuestros propios botones del widget
+    const widget = document.getElementById('laraigo-copilot-container');
+    const chatContainers = Array.from(document.querySelectorAll(
       '[class*="message"], [class*="bubble"], [class*="chat-item"], div[class*="msg"]'
     ));
 
-    for (const msg of allMessages) {
-      const text = (msg.innerText || '').toLowerCase();
-      // Si ya hay un mensaje nuestro con el saludo base
-      if (text.includes("hola técnico") || text.includes("procederemos con la atención")) {
+    for (const msg of chatContainers) {
+      if (widget && widget.contains(msg)) continue;
+      const text = normalizeText(msg.innerText || '');
+      if (text.includes("hola tecnico, procederemos con la atencion")) {
         return true;
       }
     }
@@ -250,7 +279,6 @@
   // DETECCIÓN DE LA LISTA DE TICKETS (BANDEJA)
   // ==========================================
   function getInboxTicketElements() {
-    // Selectores habituales para ítems de conversaciones en bandejas de Laraigo
     const candidateSelectors = [
       'div[class*="conversation-item"]',
       'div[class*="chat-item"]',
@@ -271,23 +299,15 @@
       }
     }
 
-    // Fallback: buscar divs en el panel izquierdo que tengan apariencia de ticket (contienen nombre, hora, etc.)
     const leftPanel = document.querySelector('aside, div[class*="sidebar"], div[class*="inbox"], div[class*="list"]');
     if (leftPanel) {
       const items = Array.from(leftPanel.querySelectorAll('div > div')).filter(el => {
-        return el.offsetParent !== null && el.innerText && el.innerText.length > 5 && el.innerText.length < 200 && el.querySelector('p, span, b');
+        return el.offsetParent !== null && el.innerText && el.innerText.length > 5 && el.innerText.length < 250 && el.querySelector('p, span, b');
       });
       if (items.length > 0) return items.slice(0, 15);
     }
 
     return [];
-  }
-
-  function getTicketIdentifier(ticketElement) {
-    if (!ticketElement) return null;
-    const text = (ticketElement.innerText || '').trim();
-    // Tomar las primeras 2 líneas como firma identificadora
-    return text.split('\n').slice(0, 2).join('::');
   }
 
   // ==========================================
@@ -302,7 +322,7 @@
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
       badge.innerText = "Buscando tickets sin responder...";
-      showToast("🔍 Escaneo de bandeja iniciado", "info");
+      showToast("🔍 Escaneo automático iniciado", "info");
       currentTicketIndex = 0;
       runNextScannerStep();
     } else {
@@ -321,61 +341,111 @@
     const badge = document.getElementById('lc-scanner-status');
 
     if (tickets.length === 0) {
-      badge.innerText = "Esperando que caigan tickets a la bandeja...";
-      // Volver a revisar en 3 segundos
-      scannerLoopTimeout = setTimeout(runNextScannerStep, 3000);
+      badge.innerText = "Revisando chat abierto actual...";
+      processCurrentOpenTicket(() => {
+        scannerLoopTimeout = setTimeout(runNextScannerStep, 3000);
+      });
       return;
     }
 
     if (currentTicketIndex >= tickets.length) {
-      badge.innerText = `Revisados ${tickets.length} tickets. Esperando nuevos...`;
+      badge.innerText = `Ciclo completado (${tickets.length} tickets). Re-escaneando...`;
       currentTicketIndex = 0;
-      scannerLoopTimeout = setTimeout(runNextScannerStep, 4000);
+      scannerLoopTimeout = setTimeout(runNextScannerStep, 3500);
       return;
     }
 
     const ticketEl = tickets[currentTicketIndex];
-    const ticketId = getTicketIdentifier(ticketEl);
+    badge.innerText = `Abriendo ticket ${currentTicketIndex + 1} de ${tickets.length}...`;
 
-    badge.innerText = `Revisando ticket ${currentTicketIndex + 1} de ${tickets.length}...`;
-
-    // Hacer clic en el ticket para abrir la conversación
     ticketEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     ticketEl.click();
 
-    // Esperar 1.5 segundos a que cargue el contenido del chat
     scannerLoopTimeout = setTimeout(() => {
       if (!isScanningQueue) return;
-
-      const hasAnswer = doesCurrentChatAlreadyHaveResponse();
-
-      if (hasAnswer) {
-        badge.innerText = `Ticket ${currentTicketIndex + 1}: Ya respondido. Pasando al siguiente...`;
-        processedTicketIds.add(ticketId);
+      processCurrentOpenTicket(() => {
         currentTicketIndex++;
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 1000);
-        return;
-      }
-
-      // Si no tiene respuesta, buscar el submotivo
-      badge.innerText = `Ticket ${currentTicketIndex + 1}: ¡Sin respuesta! Escaneando submotivo...`;
-      const submotivo = scanScreenForSubmotivo();
-
-      if (submotivo) {
-        badge.innerText = `🎯 Encontrado: ${submotivo.name}. Enviando mensaje...`;
-        sendReply(submotivo.reply, true);
-        processedTicketIds.add(ticketId);
-
-        // Esperar 2.5 segundos para confirmar envío y pasar al siguiente
-        currentTicketIndex++;
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 2500);
-      } else {
-        badge.innerText = `⚠️ Submotivo no claro en ticket ${currentTicketIndex + 1}. Pasando al siguiente...`;
-        currentTicketIndex++;
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 1800);
-      }
-
+        scannerLoopTimeout = setTimeout(runNextScannerStep, 2000);
+      });
     }, 1500);
+  }
+
+  function processCurrentOpenTicket(onDone) {
+    const badge = document.getElementById('lc-scanner-status');
+
+    if (doesCurrentChatAlreadyHaveResponse()) {
+      badge.innerText = `Ticket ya tiene respuesta. Saltando...`;
+      onDone();
+      return;
+    }
+
+    const detected = scanScreenForSubmotivo();
+    updateDetectedPreview(detected);
+
+    if (detected && detected.rule) {
+      badge.innerText = `🎯 Submotivo: "${detected.rawSubmotivo}" ➔ Enviando respuesta...`;
+      sendReply(detected.rule.reply, true);
+      setTimeout(onDone, 1000);
+    } else if (detected && !detected.rule) {
+      badge.innerText = `⚠️ Submotivo "${detected.rawSubmotivo}" sin regla asignada.`;
+      onDone();
+    } else {
+      badge.innerText = `🔍 Sin línea "Submotivo:" visible en este chat.`;
+      onDone();
+    }
+  }
+
+  function updateDetectedPreview(detected) {
+    const previewEl = document.getElementById('lc-live-detected');
+    if (!previewEl) return;
+
+    // Limpiar resaltados previos
+    document.querySelectorAll('.lc-submotivo-btn').forEach(b => b.classList.remove('highlighted'));
+
+    if (detected && detected.rule) {
+      const sotBadge = detected.sot ? ` | <b>SOT: ${detected.sot}</b>` : '';
+      previewEl.innerHTML = `
+        <div class="lc-detected-box found">
+          <div>🎯 Leído: <b>Submotivo: ${detected.rawSubmotivo}</b>${sotBadge}</div>
+          <button id="lc-quick-send-detected" class="lc-quick-send-btn">
+            🚀 Enviar ahora: "${detected.rule.reply}"
+          </button>
+        </div>
+      `;
+      const qBtn = document.getElementById('lc-quick-send-detected');
+      if (qBtn) {
+        qBtn.onclick = () => sendReply(detected.rule.reply, true);
+      }
+
+      const matchingBtn = document.querySelector(`.lc-submotivo-btn[data-id="${detected.rule.id}"]`);
+      if (matchingBtn) matchingBtn.classList.add('highlighted');
+    } else if (detected && detected.rawSubmotivo) {
+      previewEl.innerHTML = `
+        <div class="lc-detected-box unknown">
+          ⚠️ Submotivo leído: <b>${detected.rawSubmotivo}</b> (Selecciona plantilla abajo)
+        </div>
+      `;
+    } else {
+      previewEl.innerHTML = `
+        <div class="lc-detected-box waiting">
+          🔍 Abre un chat para leer la línea <code>Submotivo: ...</code>
+        </div>
+      `;
+    }
+  }
+
+  // Monitorear en vivo cuando el asesor cambia de chat manualmente
+  function startManualTicketMonitor() {
+    let debounceTimer = null;
+    const observer = new MutationObserver(() => {
+      if (isScanningQueue) return;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        const detected = scanScreenForSubmotivo();
+        updateDetectedPreview(detected);
+      }, 600);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
   // ==========================================
@@ -391,7 +461,7 @@
     container.innerHTML = `
       <div class="lc-header" id="lc-drag-handle">
         <div class="lc-title">
-          <span class="lc-badge">CLARO SOPORTE</span> Asistente Técnicos
+          <span class="lc-badge">CLARO SOPORTE</span> Lector de Submotivo
         </div>
         <div class="lc-actions">
           <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar">_</button>
@@ -399,24 +469,25 @@
       </div>
 
       <div class="lc-body" id="lc-body">
+        <!-- Detector en tiempo real del mensaje abierto -->
+        <div id="lc-live-detected">
+          <div class="lc-detected-box waiting">
+            🔍 Abre un chat para leer la línea <code>Submotivo: ...</code>
+          </div>
+        </div>
+
         <!-- Control de Auto-Escaneo de Bandeja -->
         <div class="lc-scanner-panel">
           <button id="lc-btn-scanner" class="lc-btn-scanner">
             ▶️ Auto-Escanear Tickets Pendientes
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            Listo para escanear bandeja y responder tickets vacíos
+            Ignora "Tipo:" y "Motivo:", lee solo "Submotivo:"
           </div>
         </div>
 
-        <div class="lc-section-title">⚡ Submotivos (Clic para enviar directo)</div>
-        <div class="lc-submotivos-grid" id="lc-submotivos-list">
-          <!-- Botones de submotivos -->
-        </div>
-
-        <div class="lc-footer">
-          <small>💡 El auto-escáner cambia de ticket, revisa si ya contestaste y si no, manda la plantilla del submotivo.</small>
-        </div>
+        <div class="lc-section-title">⚡ Plantillas por Submotivo (1 Clic)</div>
+        <div class="lc-submotivos-grid" id="lc-submotivos-list"></div>
       </div>
     `;
 
@@ -434,6 +505,7 @@
     scannerBtn.addEventListener('click', toggleScanner);
 
     renderSubmotivoButtons();
+    startManualTicketMonitor();
   }
 
   function renderSubmotivoButtons() {
@@ -478,7 +550,6 @@
     }, 3000);
   }
 
-  // Iniciar al cargar página
   initUI();
 
 })();
