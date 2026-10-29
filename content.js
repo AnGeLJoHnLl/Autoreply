@@ -1,76 +1,77 @@
-// Laraigo Auto-Reply Copilot - Content Script
+// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
 (function () {
   'use strict';
 
-  // Configuración por defecto
-  const DEFAULT_CONFIG = {
-    enabled: true,
+  // Base fija de mensaje para técnicos
+  const BASE_GREETING = "Hola Técnico, Procederemos con la atención";
+
+  // Mapeo de Submotivos y sus respuestas oficiales
+  const SUBMOTIVO_MAP = [
+    {
+      id: "activaciones",
+      name: "Activaciones",
+      keywords: ["activaciones", "activacion", "activar"],
+      reply: `${BASE_GREETING}, enviar error de toa`
+    },
+    {
+      id: "reenvio",
+      name: "Reenvío",
+      keywords: ["reenvio", "reenvío"],
+      reply: `${BASE_GREETING}, enviar captura de reenvio desde su toa`
+    },
+    {
+      id: "cintillos",
+      name: "Consulta de Cintillos",
+      keywords: ["cintillos", "cintillo", "consulta de cintillos", "fat", "tap"],
+      reply: `${BASE_GREETING}, enviar cintillos y foto del fat/tap`
+    },
+    {
+      id: "mesh",
+      name: "Registro Mesh",
+      keywords: ["registro mesh", "mesh", "repetidor"],
+      reply: `${BASE_GREETING}, enviar repetidor a activar`
+    },
+    {
+      id: "manto",
+      name: "SOT de Manto",
+      keywords: ["sot de manto", "manto", "sot manto"],
+      reply: `${BASE_GREETING}, ¿cuál es el motivo de la sot de manto?`
+    },
+    {
+      id: "pext",
+      name: "Derivación a PEXT",
+      keywords: ["derivacion a pext", "derivación a pext", "pext", "derivacion pext"],
+      reply: `${BASE_GREETING}, enviar evidencias y motivo de la derivacion`
+    }
+  ];
+
+  let config = {
     autoReplyActive: false,
-    autoReplyDelay: 2000,
-    agentName: "Asesor",
-    templates: [
-      {
-        id: "saludo",
-        title: "👋 Saludo Inicial",
-        text: "¡Hola! Gracias por comunicarte con Claro. Mi nombre es {{agente}}. ¿En qué puedo ayudarte hoy?"
-      },
-      {
-        id: "solicitar_dni",
-        title: "🪪 Pedir DNI / Titular",
-        text: "Para brindarte una atención personalizada y validar tu línea, por favor confírmame tu nombre completo, número de DNI y el número Claro consultado."
-      },
-      {
-        id: "espera",
-        title: "⏳ Un momento",
-        text: "Permíteme un momento en línea mientras verifico los detalles de tu cuenta en el sistema, por favor."
-      },
-      {
-        id: "despedida",
-        title: "🌟 Despedida",
-        text: "Ha sido un gusto atenderte. Si tienes alguna otra consulta, no dudes en escribirnos. ¡Que tengas un excelente día!"
-      }
-    ],
-    rules: [
-      {
-        keywords: ["hola", "buen dia", "buenas tardes", "buenas noches", "buenos dias"],
-        reply: "¡Hola! Bienvenido al canal de atención de Claro. ¿En qué podemos ayudarte el día de hoy?"
-      },
-      {
-        keywords: ["precio", "costo", "planes", "promocion", "renovacion"],
-        reply: "Con gusto te comparto nuestras promociones vigentes. Por favor indícame si buscas un plan prepago, postpago o servicio para tu hogar."
-      },
-      {
-        keywords: ["asesor", "humano", "persona", "operador"],
-        reply: "¡Claro que sí! Estás en contacto con un asesor. Por favor detállanos tu consulta para ayudarte de inmediato."
-      }
-    ]
+    autoReplyDelay: 1500, // 1.5 seg
+    autoDetectSubmotivo: true
   };
 
-  let currentConfig = { ...DEFAULT_CONFIG };
-  let lastProcessedMessage = null;
+  let lastTicketProcessed = null;
+  let detectedSubmotivo = null;
 
-  // Cargar configuración guardada
-  chrome.storage.local.get(["laraigo_config"], (result) => {
-    if (result.laraigo_config) {
-      currentConfig = { ...DEFAULT_CONFIG, ...result.laraigo_config };
-    } else {
-      chrome.storage.local.set({ laraigo_config: currentConfig });
+  // Cargar configuración de almacenamiento
+  chrome.storage.local.get(["laraigo_tech_config"], (result) => {
+    if (result.laraigo_tech_config) {
+      config = { ...config, ...result.laraigo_tech_config };
     }
     initUI();
-    startChatObserver();
+    startTicketObserver();
   });
 
-  // Escuchar cambios de almacenamiento (desde el popup)
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.laraigo_config) {
-      currentConfig = { ...DEFAULT_CONFIG, ...changes.laraigo_config.newValue };
+    if (area === "local" && changes.laraigo_tech_config) {
+      config = { ...config, ...changes.laraigo_tech_config.newValue };
       updateUI();
     }
   });
 
-  // Localizador inteligente del campo de entrada de texto en Laraigo
+  // Localizar campo de entrada en Laraigo
   function findChatInput() {
-    // 1. Textarea típica de chat
     const textareas = Array.from(document.querySelectorAll('textarea'));
     for (const ta of textareas) {
       if (ta.offsetParent !== null && !ta.disabled && !ta.readOnly) {
@@ -78,7 +79,6 @@
       }
     }
 
-    // 2. Div contenteditable (común en chats modernos)
     const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
     for (const ed of editables) {
       if (ed.offsetParent !== null) {
@@ -86,7 +86,6 @@
       }
     }
 
-    // 3. Input text visible
     const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
     for (const inp of inputs) {
       const placeholder = (inp.placeholder || '').toLowerCase();
@@ -98,16 +97,13 @@
     return null;
   }
 
-  // Localizador inteligente del botón de envío
+  // Localizar botón de enviar
   function findSendButton(inputContext) {
-    // Buscar en el contenedor padre del input
     const container = inputContext ? inputContext.closest('form, div[class*="footer"], div[class*="input"], div[class*="chat"]') || document : document;
 
-    // 1. Botones con tipo submit
     const submitBtn = container.querySelector('button[type="submit"]');
     if (submitBtn && submitBtn.offsetParent !== null && !submitBtn.disabled) return submitBtn;
 
-    // 2. Botones con iconos SVG (común en Laraigo / chats)
     const buttons = Array.from(container.querySelectorAll('button'));
     for (const btn of buttons) {
       if (btn.offsetParent === null || btn.disabled) continue;
@@ -124,7 +120,6 @@
       }
     }
 
-    // Fallback: el último botón habilitado en el área del footer
     for (let i = buttons.length - 1; i >= 0; i--) {
       if (buttons[i].offsetParent !== null && !buttons[i].disabled) {
         return buttons[i];
@@ -134,7 +129,7 @@
     return null;
   }
 
-  // Escribir texto de forma compatible con React/Vue
+  // Escribir texto compatible con React / Vue
   function setInputValue(target, text) {
     if (!target) return false;
     const { element, type } = target;
@@ -161,7 +156,6 @@
     return true;
   }
 
-  // Enviar mensaje
   function triggerSend(inputTarget) {
     const btn = findSendButton(inputTarget?.element);
     if (btn) {
@@ -169,7 +163,6 @@
       return true;
     }
 
-    // Si no encuentra botón, simular tecla Enter
     if (inputTarget?.element) {
       const enterEvent = new KeyboardEvent('keydown', {
         key: 'Enter',
@@ -185,87 +178,144 @@
     return false;
   }
 
-  // Procesar texto de plantilla con variables
-  function formatTemplateText(templateText) {
-    return templateText.replace(/\{\{agente\}\}/gi, currentConfig.agentName || "Asesor");
-  }
-
-  // Insertar respuesta en el chat
-  function insertReply(text, andSend = false) {
-    const processedText = formatTemplateText(text);
+  function sendReply(text, andSend = true) {
     const target = findChatInput();
     if (!target) {
-      showToast("⚠️ No se encontró la caja de texto del chat. Abre una conversación.", "warning");
+      showToast("⚠️ Abre el chat del técnico primero", "warning");
       return;
     }
 
-    setInputValue(target, processedText);
+    setInputValue(target, text);
 
     if (andSend) {
       setTimeout(() => {
-        const sent = triggerSend(target);
-        if (sent) {
-          showToast("🚀 Mensaje enviado con éxito", "success");
-        } else {
-          showToast("✏️ Texto insertado (presiona Enviar)", "info");
-        }
-      }, 250);
+        triggerSend(target);
+        showToast("🚀 Mensaje enviado al técnico", "success");
+      }, 200);
     } else {
-      showToast("📝 Respuesta insertada en el campo de texto", "info");
+      showToast("✏️ Texto insertado en el chat", "info");
     }
   }
 
-  // Buscar coincidencia por palabras clave
-  function findMatchingRule(messageText) {
-    if (!messageText) return null;
-    const cleanMsg = messageText.toLowerCase().trim();
-
-    for (const rule of currentConfig.rules || []) {
-      for (const kw of rule.keywords) {
-        if (cleanMsg.includes(kw.toLowerCase().trim())) {
-          return rule;
+  // ==========================================
+  // DETECCIÓN INTELIGENTE DEL SUBMOTIVO
+  // ==========================================
+  function scanScreenForSubmotivo() {
+    // 1. Buscar en campos laterales de información del ticket (labels "Submotivo", "Motivo", etc.)
+    const allElements = document.querySelectorAll('div, span, p, td, label, b, strong');
+    for (const el of allElements) {
+      const text = el.innerText ? el.innerText.toLowerCase().trim() : '';
+      if (text.startsWith('submotivo') || text.includes('submotivo:')) {
+        // Mirar este elemento o el hermano/siguiente elemento
+        const fullContext = (el.innerText + ' ' + (el.nextElementSibling ? el.nextElementSibling.innerText : '')).toLowerCase();
+        for (const item of SUBMOTIVO_MAP) {
+          if (item.keywords.some(kw => fullContext.includes(kw))) {
+            return item;
+          }
         }
       }
     }
+
+    // 2. Buscar en los primeros mensajes del chat (muchas veces el bot del técnico pone "Submotivo: Activaciones")
+    const messageNodes = document.querySelectorAll(
+      '[class*="message"], [class*="bubble"], [class*="chat-item"], .message-received, .msg-incoming'
+    );
+
+    // Revisar los primeros 3 mensajes o todos si son pocos
+    const limit = Math.min(messageNodes.length, 5);
+    for (let i = 0; i < limit; i++) {
+      const msgText = (messageNodes[i].innerText || '').toLowerCase();
+      for (const item of SUBMOTIVO_MAP) {
+        if (item.keywords.some(kw => msgText.includes(kw))) {
+          return item;
+        }
+      }
+    }
+
+    // 3. Buscar en badges o etiquetas superiores del chat
+    const headerBadges = document.querySelectorAll('header, [class*="header"], [class*="tag"], [class*="badge"]');
+    for (const badge of headerBadges) {
+      const bText = (badge.innerText || '').toLowerCase();
+      for (const item of SUBMOTIVO_MAP) {
+        if (item.keywords.some(kw => bText.includes(kw))) {
+          return item;
+        }
+      }
+    }
+
     return null;
   }
 
-  // Observador de nuevos mensajes
-  function startChatObserver() {
-    const observer = new MutationObserver((mutations) => {
-      if (!currentConfig.autoReplyActive) return;
+  // Observador de pantalla (cambio de ticket o apertura de chat)
+  function startTicketObserver() {
+    let scanTimeout = null;
 
-      // Buscar mensajes entrantes del cliente
-      // Laraigo suele tener mensajes alineados a la izquierda o con clase tipo 'incoming' / 'received'
-      const messageNodes = document.querySelectorAll(
-        '[class*="message"], [class*="bubble"], [class*="chat-item"], .message-received, .msg-incoming'
-      );
-
-      if (messageNodes.length === 0) return;
-      const lastMsgNode = messageNodes[messageNodes.length - 1];
-      const text = (lastMsgNode.innerText || '').trim();
-
-      if (!text || text === lastProcessedMessage) return;
-
-      // Descartar si el mensaje es del propio agente (normalmente a la derecha o con clase 'sent' / 'outgoing')
-      const isOutgoing = lastMsgNode.closest('[class*="sent"], [class*="outgoing"], [class*="right"]');
-      if (isOutgoing) return;
-
-      lastProcessedMessage = text;
-
-      const rule = findMatchingRule(text);
-      if (rule) {
-        showToast(`🤖 Regla detectada: "${rule.keywords[0]}". Respondiendo...`, "info");
-        setTimeout(() => {
-          insertReply(rule.reply, true);
-        }, currentConfig.autoReplyDelay || 2000);
-      }
+    const observer = new MutationObserver(() => {
+      clearTimeout(scanTimeout);
+      scanTimeout = setTimeout(() => {
+        checkCurrentTicket();
+      }, 500);
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  // Interfaz de Usuario Flotante (Widget Copiloto)
+  function checkCurrentTicket() {
+    // Verificar si hay un chat abierto
+    const input = findChatInput();
+    if (!input) return;
+
+    // Detectar el submotivo actual en pantalla
+    const match = scanScreenForSubmotivo();
+    updateDetectedUI(match);
+
+    // Si modo automático está encendido y encontramos un submotivo que no hayamos procesado en este ticket
+    if (config.autoReplyActive && match) {
+      // Obtener algún identificador del ticket actual (ej: URL o ID de conversación)
+      const currentUrl = window.location.href;
+      const ticketIdKey = currentUrl + '_' + match.id;
+
+      if (lastTicketProcessed !== ticketIdKey) {
+        lastTicketProcessed = ticketIdKey;
+        showToast(`⚡ Submotivo "${match.name}" detectado. Respondiendo...`, "info");
+        setTimeout(() => {
+          sendReply(match.reply, true);
+        }, config.autoReplyDelay || 1500);
+      }
+    }
+  }
+
+  function updateDetectedUI(match) {
+    detectedSubmotivo = match;
+    const statusEl = document.getElementById('lc-detected-badge');
+    const autoSendBtn = document.getElementById('lc-auto-send-detected');
+    if (!statusEl) return;
+
+    if (match) {
+      statusEl.innerHTML = `<span class="lc-tag lc-tag-found">🎯 Submotivo: <b>${match.name}</b></span>`;
+      if (autoSendBtn) {
+        autoSendBtn.style.display = 'block';
+        autoSendBtn.innerText = `Enviar: "${match.reply}"`;
+        autoSendBtn.onclick = () => sendReply(match.reply, true);
+      }
+    } else {
+      statusEl.innerHTML = `<span class="lc-tag lc-tag-waiting">🔍 Esperando ticket con submotivo...</span>`;
+      if (autoSendBtn) {
+        autoSendBtn.style.display = 'none';
+      }
+    }
+
+    // Resaltar el botón correspondiente en la cuadrícula
+    document.querySelectorAll('.lc-submotivo-btn').forEach(btn => {
+      if (match && btn.dataset.id === match.id) {
+        btn.classList.add('highlighted');
+      } else {
+        btn.classList.remove('highlighted');
+      }
+    });
+  }
+
+  // Interfaz de Usuario
   function initUI() {
     if (document.getElementById('laraigo-copilot-container')) return;
 
@@ -276,30 +326,41 @@
     container.innerHTML = `
       <div class="lc-header" id="lc-drag-handle">
         <div class="lc-title">
-          <span class="lc-badge">Laraigo</span> Copiloto
+          <span class="lc-badge">CLARO SOPORTE</span> Asistente Técnicos
         </div>
         <div class="lc-actions">
-          <button id="lc-toggle-auto" class="lc-btn-pill ${currentConfig.autoReplyActive ? 'active' : ''}" title="Activar/Desactivar Respuesta 100% Automática">
-            🤖 Auto: <span id="lc-auto-status">${currentConfig.autoReplyActive ? 'ON' : 'OFF'}</span>
+          <button id="lc-toggle-auto" class="lc-btn-pill ${config.autoReplyActive ? 'active' : ''}" title="Si activas esto, responderá solo al abrir el ticket">
+            🤖 Auto: <span id="lc-auto-status">${config.autoReplyActive ? 'ON' : 'OFF'}</span>
           </button>
           <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar">_</button>
         </div>
       </div>
+
       <div class="lc-body" id="lc-body">
-        <div class="lc-section-title">⚡ Respuestas Rápidas</div>
-        <div class="lc-templates-grid" id="lc-templates-container">
-          <!-- Se inyectan dinámicamente -->
+        <!-- Estado detectado automáticamente -->
+        <div class="lc-detection-panel">
+          <div id="lc-detected-badge">
+            <span class="lc-tag lc-tag-waiting">🔍 Escaneando submotivo...</span>
+          </div>
+          <button id="lc-auto-send-detected" class="lc-btn-detected-send" style="display: none;">
+            <!-- Se llena dinámicamente -->
+          </button>
+        </div>
+
+        <div class="lc-section-title">⚡ Submotivos (Clic para enviar)</div>
+        <div class="lc-submotivos-grid" id="lc-submotivos-list">
+          <!-- Botones de los 6 submotivos -->
         </div>
 
         <div class="lc-footer">
-          <div class="lc-hint">💡 Clic simple: <b>Insertar</b> | Doble clic: <b>Insertar y Enviar</b></div>
+          <small>💡 <b>1 Clic:</b> Enviar mensaje directo al técnico.</small>
         </div>
       </div>
     `;
 
     document.body.appendChild(container);
 
-    // Eventos del widget
+    // Eventos
     const collapseBtn = container.querySelector('#lc-btn-collapse');
     const bodyEl = container.querySelector('#lc-body');
     const toggleAutoBtn = container.querySelector('#lc-toggle-auto');
@@ -311,45 +372,45 @@
     });
 
     toggleAutoBtn.addEventListener('click', () => {
-      currentConfig.autoReplyActive = !currentConfig.autoReplyActive;
-      toggleAutoBtn.classList.toggle('active', currentConfig.autoReplyActive);
-      autoStatus.innerText = currentConfig.autoReplyActive ? 'ON' : 'OFF';
-      chrome.storage.local.set({ laraigo_config: currentConfig });
+      config.autoReplyActive = !config.autoReplyActive;
+      toggleAutoBtn.classList.toggle('active', config.autoReplyActive);
+      autoStatus.innerText = config.autoReplyActive ? 'ON' : 'OFF';
+      chrome.storage.local.set({ laraigo_tech_config: config });
       showToast(
-        currentConfig.autoReplyActive ? "🤖 Auto-Respuesta ACTIVADA" : "⏸️ Auto-Respuesta en pausa",
-        currentConfig.autoReplyActive ? "success" : "info"
+        config.autoReplyActive ? "🤖 Auto-Envío al abrir ticket ACTIVADO" : "⏸️ Modo manual (1 clic)",
+        config.autoReplyActive ? "success" : "info"
       );
+      if (config.autoReplyActive) {
+        checkCurrentTicket();
+      }
     });
 
-    renderTemplates();
+    renderSubmotivoButtons();
   }
 
-  function renderTemplates() {
-    const listContainer = document.getElementById('lc-templates-container');
-    if (!listContainer) return;
-    listContainer.innerHTML = '';
+  function renderSubmotivoButtons() {
+    const list = document.getElementById('lc-submotivos-list');
+    if (!list) return;
+    list.innerHTML = '';
 
-    currentConfig.templates.forEach((tpl) => {
+    SUBMOTIVO_MAP.forEach((item) => {
       const btn = document.createElement('button');
-      btn.className = 'lc-tpl-btn';
-      btn.title = formatTemplateText(tpl.text);
-      btn.innerHTML = `<span class="lc-tpl-name">${tpl.title}</span>`;
+      btn.className = 'lc-submotivo-btn';
+      btn.dataset.id = item.id;
+      btn.title = item.reply;
 
-      // Clic simple: rellenar campo
-      let clickTimeout;
+      btn.innerHTML = `
+        <div class="lc-btn-top">
+          <b>${item.name}</b>
+        </div>
+        <div class="lc-btn-preview">${item.reply.replace(BASE_GREETING + ',', '').trim()}</div>
+      `;
+
       btn.addEventListener('click', () => {
-        clickTimeout = setTimeout(() => {
-          insertReply(tpl.text, false);
-        }, 200);
+        sendReply(item.reply, true);
       });
 
-      // Doble clic: rellenar y enviar de inmediato
-      btn.addEventListener('dblclick', () => {
-        clearTimeout(clickTimeout);
-        insertReply(tpl.text, true);
-      });
-
-      listContainer.appendChild(btn);
+      list.appendChild(btn);
     });
   }
 
@@ -357,13 +418,11 @@
     const toggleAutoBtn = document.getElementById('lc-toggle-auto');
     const autoStatus = document.getElementById('lc-auto-status');
     if (toggleAutoBtn && autoStatus) {
-      toggleAutoBtn.classList.toggle('active', currentConfig.autoReplyActive);
-      autoStatus.innerText = currentConfig.autoReplyActive ? 'ON' : 'OFF';
+      toggleAutoBtn.classList.toggle('active', config.autoReplyActive);
+      autoStatus.innerText = config.autoReplyActive ? 'ON' : 'OFF';
     }
-    renderTemplates();
   }
 
-  // Notificación tipo Toast
   function showToast(message, type = "info") {
     let toast = document.getElementById('lc-toast');
     if (!toast) {
@@ -377,7 +436,7 @@
     clearTimeout(toast.dismissTimeout);
     toast.dismissTimeout = setTimeout(() => {
       toast.classList.remove('lc-toast-show');
-    }, 3200);
+    }, 3000);
   }
 
 })();
