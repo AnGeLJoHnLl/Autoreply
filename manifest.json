@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Laraigo Auto-Reply Copilot",
+  "version": "1.0.0",
+  "description": "Automatización y asistente de respuestas rápidas para Laraigo Inbox (Claro).",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://*.laraigo.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Laraigo Auto-Reply Copilot"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.laraigo.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
