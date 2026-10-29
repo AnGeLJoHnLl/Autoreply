@@ -1,5 +1,5 @@
 // Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
-// Con Filtro Anti-Duplicados (por SOT + Historial DOM + Storage) y Consulta en Casuísticas
+// Envía en 2 pasos: 1) Saludo ("Hola Técnico, Procederemos con la atención") y 2) Pregunta según Submotivo
 (function () {
   'use strict';
 
@@ -11,37 +11,37 @@
       id: "reenvio",
       name: "Reenvío de señal",
       keywords: ["reenvio"],
-      reply: `${BASE_GREETING}, enviar captura de reenvio desde su toa`
+      question: "enviar captura de reenvio desde su toa"
     },
     {
       id: "cintillos",
       name: "Consulta de Cintillos",
       keywords: ["cintillo", "fat", "tap"],
-      reply: `${BASE_GREETING}, enviar cintillos y foto del fat/tap`
+      question: "enviar cintillos y foto del fat/tap"
     },
     {
       id: "mesh",
       name: "Registro Mesh",
       keywords: ["mesh", "repetidor"],
-      reply: `${BASE_GREETING}, enviar repetidor a activar`
+      question: "enviar repetidor a activar"
     },
     {
       id: "manto",
       name: "SOT de Manto",
       keywords: ["manto", "mantenimiento"],
-      reply: `${BASE_GREETING}, ¿cuál es el motivo de la sot de manto?`
+      question: "¿cuál es el motivo de la sot de manto?"
     },
     {
       id: "pext",
       name: "Derivación a PEXT",
       keywords: ["pext", "derivacion", "planta externa"],
-      reply: `${BASE_GREETING}, enviar evidencias y motivo de la derivacion`
+      question: "enviar evidencias y motivo de la derivacion"
     },
     {
       id: "activaciones",
       name: "Activaciones",
       keywords: ["activacion", "activar"],
-      reply: `${BASE_GREETING}, enviar error de toa`
+      question: "enviar error de toa"
     }
   ];
 
@@ -57,14 +57,12 @@
   // ==============================================================
   // FILTRO ANTI-DUPLICADOS PERSISTENTE (SOT + FIRMA DE TICKET)
   // ==============================================================
-  let answeredRegistry = {}; // { "SOT_92138252": timestamp, "SIG_...": timestamp }
-  let skippedTickets = new Set(); // Tickets omitidos por el agente en esta sesión
-  let isSendingLock = false; // Candado para evitar doble clic o doble envío simultáneo
+  let answeredRegistry = {};
+  let skippedTickets = new Set();
+  let isSendingLock = false;
 
-  // Cargar historial de SOTs ya respondidas desde chrome.storage.local
   chrome.storage.local.get(["laraigo_answered_registry"], (res) => {
     if (res.laraigo_answered_registry) {
-      // Limpiar registros de más de 24 horas para no llenar memoria
       const now = Date.now();
       const cleaned = {};
       for (const [key, ts] of Object.entries(res.laraigo_answered_registry)) {
@@ -94,32 +92,42 @@
     return { answered: false };
   }
 
-  // Estado del escáner continuo de tickets
   let isScanningQueue = false;
   let isPausedForQuestion = false;
   let scannerLoopTimeout = null;
   let currentTicketIndex = 0;
 
-  // Localizar campo de entrada en Laraigo
+  // ==============================================================
+  // LOCALIZAR CAJA DE TEXTO Y ENVIAR MENSAJE EN LARAIGO
+  // ==============================================================
   function findChatInput() {
+    const widget = document.getElementById('laraigo-copilot-container');
+
+    // 1. Textareas visibles (excluyendo nuestro widget)
     const textareas = Array.from(document.querySelectorAll('textarea'));
     for (const ta of textareas) {
+      if (widget && widget.contains(ta)) continue;
       if (ta.offsetParent !== null && !ta.disabled && !ta.readOnly) {
         return { element: ta, type: 'textarea' };
       }
     }
 
+    // 2. Divs contenteditable visibles
     const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
     for (const ed of editables) {
+      if (widget && widget.contains(ed)) continue;
       if (ed.offsetParent !== null) {
         return { element: ed, type: 'contenteditable' };
       }
     }
 
-    const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
+    // 3. Inputs de texto de chat
+    const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'));
     for (const inp of inputs) {
+      if (widget && widget.contains(inp)) continue;
+      if (inp.offsetParent === null || inp.disabled || inp.readOnly) continue;
       const placeholder = (inp.placeholder || '').toLowerCase();
-      if (placeholder.includes('mensaje') || placeholder.includes('escribe') || placeholder.includes('chat')) {
+      if (placeholder.includes('mensaje') || placeholder.includes('escribe') || placeholder.includes('chat') || placeholder.includes('responder')) {
         return { element: inp, type: 'input' };
       }
     }
@@ -127,99 +135,185 @@
     return null;
   }
 
-  // Localizar botón de enviar
-  function findSendButton(inputContext) {
-    const container = inputContext
-      ? inputContext.closest('form, div[class*="footer"], div[class*="input"], div[class*="chat"]') || document
-      : document;
+  // Buscar el botón o ícono de Enviar que está junto a la caja de texto de Laraigo
+  function findSendButtonNearInput(inputElement) {
+    if (!inputElement) return null;
+    const widget = document.getElementById('laraigo-copilot-container');
 
-    const submitBtn = container.querySelector('button[type="submit"]');
-    if (submitBtn && submitBtn.offsetParent !== null && !submitBtn.disabled) return submitBtn;
+    // Subir hasta 4 niveles desde el input para encontrar el contenedor de la barra de mensaje
+    let footerContainer = inputElement.parentElement;
+    for (let level = 0; level < 4; level++) {
+      if (!footerContainer || footerContainer === document.body) break;
+      const candidates = Array.from(
+        footerContainer.querySelectorAll('button, [role="button"], a, i[class*="send"], i[class*="paper-plane"], span[class*="send"], mat-icon')
+      ).filter(el => {
+        if (widget && widget.contains(el)) return false;
+        if (el.offsetParent === null || el.disabled) return false;
+        return true;
+      });
 
-    const buttons = Array.from(container.querySelectorAll('button'));
-    for (const btn of buttons) {
-      if (btn.offsetParent === null || btn.disabled) continue;
-      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-      const text = (btn.innerText || '').toLowerCase();
-      const title = (btn.getAttribute('title') || '').toLowerCase();
-      const hasSvg = btn.querySelector('svg');
+      // 1. Priorizar botón con atributo o ícono de envío explícito
+      for (const el of candidates) {
+        const clickable = el.closest('button, [role="button"], a') || el;
+        const descriptor = (
+          (clickable.getAttribute('aria-label') || '') + ' ' +
+          (clickable.getAttribute('title') || '') + ' ' +
+          (clickable.getAttribute('mattooltip') || '') + ' ' +
+          (clickable.className || '') + ' ' +
+          (clickable.innerText || '') + ' ' +
+          (clickable.innerHTML || '')
+        ).toLowerCase();
 
-      if (aria.includes('enviar') || aria.includes('send') || text.includes('enviar') || title.includes('enviar')) {
-        return btn;
+        if (
+          descriptor.includes('send') ||
+          descriptor.includes('enviar') ||
+          descriptor.includes('paper-plane') ||
+          descriptor.includes('fa-paper-plane') ||
+          descriptor.includes('mdi-send') ||
+          clickable.getAttribute('type') === 'submit'
+        ) {
+          return clickable;
+        }
       }
-      if (hasSvg && (btn.classList.toString().toLowerCase().includes('send') || btn.classList.toString().toLowerCase().includes('enviar'))) {
-        return btn;
-      }
-    }
 
-    for (let i = buttons.length - 1; i >= 0; i--) {
-      if (buttons[i].offsetParent !== null && !buttons[i].disabled) {
-        return buttons[i];
+      // 2. Si hay botones dentro del mismo contenedor pequeño del input, el botón a la derecha del input suele ser Enviar
+      const buttonsInRow = Array.from(footerContainer.querySelectorAll('button, [role="button"]')).filter(
+        b => (!widget || !widget.contains(b)) && b.offsetParent !== null && !b.disabled
+      );
+      if (buttonsInRow.length > 0) {
+        const inputRect = inputElement.getBoundingClientRect();
+        // Buscar botón ubicado a la derecha del input
+        const rightButtons = buttonsInRow.filter(b => {
+          const rect = b.getBoundingClientRect();
+          return rect.left >= inputRect.right - 60 && Math.abs(rect.top - inputRect.top) < 100;
+        });
+        if (rightButtons.length > 0) {
+          return rightButtons[rightButtons.length - 1];
+        }
       }
+
+      footerContainer = footerContainer.parentElement;
     }
 
     return null;
   }
 
-  // Escribir texto compatible con React / Vue
+  // Escribir texto en la caja de Laraigo compatible con React / Angular / Vue
   function setInputValue(target, text) {
-    if (!target) return false;
+    if (!target || !target.element) return false;
     const { element, type } = target;
 
     element.focus();
 
     if (type === 'textarea' || type === 'input') {
-      const proto = Object.getPrototypeOf(element);
+      const proto = type === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
       const valueSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
       if (valueSetter) {
         valueSetter.call(element, text);
       } else {
         element.value = text;
       }
-      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (type === 'contenteditable') {
       element.focus();
       document.execCommand('selectAll', false, null);
       document.execCommand('insertText', false, text);
-      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
     }
 
     return true;
   }
 
-  function triggerSend(inputTarget) {
-    const btn = findSendButton(inputTarget?.element);
-    if (btn) {
-      btn.click();
-      return true;
+  function getInputCurrentText(target) {
+    if (!target || !target.element) return '';
+    if (target.type === 'textarea' || target.type === 'input') {
+      return (target.element.value || '').trim();
     }
-
-    if (inputTarget?.element) {
-      const enterEvent = new KeyboardEvent('keydown', {
-        key: 'Enter',
-        code: 'Enter',
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true
-      });
-      inputTarget.element.dispatchEvent(enterEvent);
-      return true;
-    }
-    return false;
+    return (target.element.innerText || '').trim();
   }
 
-  // Envío protegido con candado anti-doble-envío
-  function safeSendReply(text, detectedContext = null, force = false) {
+  // Simular clic real completo (mousedown + mouseup + click)
+  function simulateRealClick(el) {
+    if (!el) return;
+    const opts = { bubbles: true, cancelable: true, view: window };
+    el.dispatchEvent(new MouseEvent('mousedown', opts));
+    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    el.click();
+  }
+
+  // Simular Enter completo (keydown + keypress + keyup)
+  function simulateEnterKey(el) {
+    if (!el) return;
+    el.focus();
+    const keyOpts = {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      charCode: 13,
+      bubbles: true,
+      cancelable: true
+    };
+    el.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
+    el.dispatchEvent(new KeyboardEvent('keypress', keyOpts));
+    el.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
+
+    // Si está dentro de un <form>, disparar submit también
+    const parentForm = el.closest('form');
+    if (parentForm) {
+      if (typeof parentForm.requestSubmit === 'function') {
+        try { parentForm.requestSubmit(); } catch (e) {}
+      } else {
+        parentForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    }
+  }
+
+  // Pegar y enviar un mensaje individual garantizando que salga del input
+  function pasteAndSendSingleMessage(text, callback) {
+    const target = findChatInput();
+    if (!target) {
+      showToast("⚠️ No se encontró la caja de chat", "warning");
+      if (callback) callback(false);
+      return;
+    }
+
+    // 1. Pegar el texto
+    setInputValue(target, text);
+
+    // 2. Esperar 150ms a que Laraigo habilite el envío y presionar Enter
+    setTimeout(() => {
+      simulateEnterKey(target.element);
+
+      // 3. Verificar tras 220ms si el texto ya se envió (caja vacía); si sigue ahí, hacer clic en el botón Enviar
+      setTimeout(() => {
+        const remainingText = getInputCurrentText(target);
+        if (remainingText.length > 0) {
+          const sendBtn = findSendButtonNearInput(target.element);
+          if (sendBtn) {
+            simulateRealClick(sendBtn);
+          }
+        }
+        if (callback) callback(true);
+      }, 220);
+    }, 150);
+  }
+
+  // ==============================================================
+  // ENVÍO EN 2 PASOS: 1° SALUDO ➔ 2° PREGUNTA DEL SUBMOTIVO
+  // ==============================================================
+  function safeSendTwoStepReply(questionText, detectedContext = null, force = false, onComplete = null) {
     if (isSendingLock) {
       showToast("⏳ Envío en curso, evitando duplicado...", "warning");
+      if (onComplete) onComplete(false);
       return false;
     }
 
     const target = findChatInput();
     if (!target) {
       showToast("⚠️ Abre el chat del técnico primero", "warning");
+      if (onComplete) onComplete(false);
       return false;
     }
 
@@ -227,12 +321,12 @@
     const sot = detected?.sot || null;
     const sig = detected?.signature || null;
 
-    // Verificar si ya se envió antes (salvo que el asesor fuerce el reenvío explícitamente)
+    // Verificar filtro anti-duplicado antes de enviar
     if (!force) {
       if (doesCurrentChatAlreadyHaveResponse()) {
         askAgentConfirmation(
-          `⚠️ Este chat ya tiene el mensaje "Hola Técnico, Procederemos con la atención" en pantalla. ¿Seguro que deseas enviarlo otra vez?`,
-          () => safeSendReply(text, detected, true)
+          `⚠️ Este chat ya tiene respuesta enviada en pantalla. ¿Seguro que deseas volver a enviar los 2 mensajes?`,
+          () => safeSendTwoStepReply(questionText, detected, true, onComplete)
         );
         return false;
       }
@@ -241,25 +335,40 @@
       if (storageCheck.answered) {
         askAgentConfirmation(
           `⚠️ Filtro Anti-Duplicado: ${storageCheck.reason} ¿Deseas enviarlo de todas formas?`,
-          () => safeSendReply(text, detected, true)
+          () => safeSendTwoStepReply(questionText, detected, true, onComplete)
         );
         return false;
       }
     }
 
-    // Activar candado por 3 segundos
+    // Bloquear envíos duplicados mientras salen los 2 mensajes
     isSendingLock = true;
     markTicketAsAnswered(sot, sig);
 
-    setInputValue(target, text);
+    showToast(`1/2 Enviando saludo...`, "info");
 
-    setTimeout(() => {
-      triggerSend(target);
-      showToast(`🚀 Enviado${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
-      setTimeout(() => {
+    // PASO 1: Enviar el saludo "Hola Técnico, Procederemos con la atención"
+    pasteAndSendSingleMessage(BASE_GREETING, (step1Ok) => {
+      if (!step1Ok) {
         isSendingLock = false;
-      }, 2500);
-    }, 300);
+        if (onComplete) onComplete(false);
+        return;
+      }
+
+      // Esperar 1.1 segundos para que el primer mensaje salga limpio antes de mandar la pregunta
+      setTimeout(() => {
+        showToast(`2/2 Enviando: "${questionText}"`, "info");
+
+        // PASO 2: Enviar la pregunta del submotivo
+        pasteAndSendSingleMessage(questionText, () => {
+          showToast(`✅ 2 mensajes enviados${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
+          setTimeout(() => {
+            isSendingLock = false;
+            if (onComplete) onComplete(true);
+          }, 1500);
+        });
+      }, 1100);
+    });
 
     return true;
   }
@@ -270,16 +379,13 @@
   function extractSubmotivoFromText(rawText) {
     if (!rawText) return null;
 
-    // Contar cuántas veces aparece "Submotivo:" en el texto para detectar múltiples plantillas
     const allSubmotivoMatches = [...rawText.matchAll(/submotivo\s*:\s*([^\r\n]+)/gi)];
     if (allSubmotivoMatches.length === 0) return null;
 
-    // Tomar el último Submotivo enviado por el técnico
     const lastMatch = allSubmotivoMatches[allSubmotivoMatches.length - 1];
     const rawSubmotivoValue = (lastMatch[1] || '').trim();
     const normalizedValue = normalizeText(rawSubmotivoValue);
 
-    // Extraer SOT y Nombre del técnico para el filtro anti-duplicados
     const sotMatches = [...rawText.matchAll(/SOT\s*[:#-]?\s*(\d{5,12})/gi)];
     const sotNumber = sotMatches.length > 0 ? sotMatches[sotMatches.length - 1][1] : null;
 
@@ -288,11 +394,9 @@
 
     const signature = `${techName || 'TECH'}_${sotNumber || 'NOSOT'}_${normalizedValue}`;
 
-    // Detectar si hay múltiples submotivos distintos en el mismo chat (casuística)
     const uniqueSubmotivos = new Set(allSubmotivoMatches.map(m => normalizeText(m[1])));
     const hasMultipleDifferentSubmotivos = uniqueSubmotivos.size > 1;
 
-    // Si el submotivo dice "null", está vacío o es muy corto
     if (!normalizedValue || normalizedValue === 'null' || normalizedValue === 'ninguno') {
       return {
         rule: null,
@@ -304,7 +408,6 @@
       };
     }
 
-    // Buscar regla coincidente
     let matchedRules = [];
     for (const rule of SUBMOTIVO_MAP) {
       if (rule.keywords.some(kw => normalizedValue.includes(normalizeText(kw)))) {
@@ -368,7 +471,7 @@
   }
 
   // ==========================================
-  // COMPROBAR SI EL CHAT ACTUAL YA TIENE RESPUESTA EN PANTALLA
+  // COMPROBAR SI EL CHAT ACTUAL YA TIENE RESPUESTA
   // ==========================================
   function doesCurrentChatAlreadyHaveResponse() {
     const widget = document.getElementById('laraigo-copilot-container');
@@ -390,15 +493,6 @@
       if (widget && widget.contains(msg)) continue;
       const text = normalizeText(msg.innerText || '');
       if (knownPhrases.some(phrase => text.includes(phrase))) {
-        return true;
-      }
-    }
-
-    // También revisar si la caja de texto ya tiene escrito el mensaje sin enviar
-    const input = findChatInput();
-    if (input && input.element) {
-      const currentInputVal = normalizeText(input.element.value || input.element.innerText || '');
-      if (currentInputVal.includes("hola tecnico")) {
         return true;
       }
     }
@@ -486,8 +580,8 @@
     if (isScanningQueue) {
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "Iniciando escaneo seguro (anti-duplicados activo)...";
-      showToast("🔍 Escaneo seguro iniciado", "info");
+      badge.innerText = "Iniciando escaneo en 2 pasos (Saludo + Pregunta)...";
+      showToast("🔍 Escaneo iniciado", "info");
       currentTicketIndex = 0;
       runNextScannerStep();
     } else {
@@ -506,7 +600,7 @@
     const badge = document.getElementById('lc-scanner-status');
 
     if (tickets.length === 0) {
-      badge.innerText = "Verificando chat actual...";
+      badge.innerText = "Verificando chat abierto...";
       processCurrentOpenTicket(() => {
         scannerLoopTimeout = setTimeout(runNextScannerStep, 3000);
       });
@@ -540,7 +634,6 @@
     const detected = scanScreenForSubmotivo();
     updateDetectedPreview(detected);
 
-    // 1. Filtro DOM: ¿Ya está nuestro mensaje en la pantalla del chat?
     if (doesCurrentChatAlreadyHaveResponse()) {
       if (detected) markTicketAsAnswered(detected.sot, detected.signature);
       badge.innerText = `✅ Ya respondido en chat. Saltando al siguiente...`;
@@ -548,14 +641,12 @@
       return;
     }
 
-    // 2. Si no hay mensaje de técnico con formato de plantilla
     if (!detected) {
       badge.innerText = `🔍 Sin plantilla de técnico en este chat. Saltando...`;
       onDone();
       return;
     }
 
-    // 3. Filtro Storage: ¿Ya habíamos respondido esta SOT antes?
     const storageCheck = wasTicketAlreadyAnsweredInStorage(detected.sot, detected.signature);
     if (storageCheck.answered) {
       badge.innerText = `🛡️ Anti-duplicado: SOT ${detected.sot || ''} ya fue atendida. Saltando...`;
@@ -563,14 +654,12 @@
       return;
     }
 
-    // 4. ¿Fue omitido manualmente por el agente?
     if (skippedTickets.has(detected.signature)) {
       badge.innerText = `⏭️ Ticket omitido previamente. Saltando...`;
       onDone();
       return;
     }
 
-    // 5. ¿Hay alguna CASUÍSTICA dudosa? -> PAUSAR Y PREGUNTAR AL ASESOR
     if (detected.casuistica || !detected.rule) {
       badge.innerText = `⚠️ Pausado: Casuística requiere tu decisión`;
       showToast("⚠️ Casuística detectada: revisa el panel", "warning");
@@ -578,8 +667,7 @@
       askAgentConfirmation(
         `❓ CASUÍSTICA DETECTADA:\n${detected.casuistica || 'No se pudo determinar la plantilla.'}\n\nElige una plantilla manualmente abajo o presiona "Omitir / Cancelar" para saltar al siguiente ticket.`,
         detected.rule ? () => {
-          safeSendReply(detected.rule.reply, detected, true);
-          setTimeout(onDone, 2500);
+          safeSendTwoStepReply(detected.rule.question, detected, true, () => onDone());
         } : null,
         () => {
           skippedTickets.add(detected.signature);
@@ -589,10 +677,8 @@
       return;
     }
 
-    // 6. Todo claro y verificado -> Enviar 1 sola vez
-    badge.innerText = `🎯 SOT ${detected.sot || ''} (${detected.rawSubmotivo}) ➔ Enviando 1 mensaje...`;
-    safeSendReply(detected.rule.reply, detected, true);
-    setTimeout(onDone, 2800);
+    badge.innerText = `🎯 SOT ${detected.sot || ''} (${detected.rawSubmotivo}) ➔ Enviando 1° Saludo y 2° Pregunta...`;
+    safeSendTwoStepReply(detected.rule.question, detected, true, () => onDone());
   }
 
   function updateDetectedPreview(detected) {
@@ -631,13 +717,13 @@
         <div class="lc-detected-box found">
           <div>🎯 Leído: <b>Submotivo: ${detected.rawSubmotivo}</b>${sotBadge}</div>
           <button id="lc-quick-send-detected" class="lc-quick-send-btn">
-            🚀 Enviar 1 vez: "${detected.rule.reply}"
+            🚀 Enviar (1° Saludo + 2° "${detected.rule.question}")
           </button>
         </div>
       `;
       const qBtn = document.getElementById('lc-quick-send-detected');
       if (qBtn) {
-        qBtn.onclick = () => safeSendReply(detected.rule.reply, detected, false);
+        qBtn.onclick = () => safeSendTwoStepReply(detected.rule.question, detected, false);
       }
 
       const matchingBtn = document.querySelector(`.lc-submotivo-btn[data-id="${detected.rule.id}"]`);
@@ -651,11 +737,10 @@
     }
   }
 
-  // Monitorear en vivo cuando el asesor cambia de chat manualmente
   function startManualTicketMonitor() {
     let debounceTimer = null;
     const observer = new MutationObserver(() => {
-      if (isScanningQueue) return;
+      if (isScanningQueue || isSendingLock) return;
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         const detected = scanScreenForSubmotivo();
@@ -678,7 +763,7 @@
     container.innerHTML = `
       <div class="lc-header" id="lc-drag-handle">
         <div class="lc-title">
-          <span class="lc-badge">CLARO SOPORTE</span> Anti-Duplicado
+          <span class="lc-badge">CLARO SOPORTE</span> Envío 2 Pasos
         </div>
         <div class="lc-actions">
           <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar">_</button>
@@ -708,11 +793,11 @@
             ▶️ Auto-Escanear Tickets Pendientes
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            🛡️ Filtro activo: 1 solo mensaje por SOT + Pregunta en casuísticas
+            1° Manda Saludo ➔ 2° Manda Pregunta del Submotivo
           </div>
         </div>
 
-        <div class="lc-section-title">⚡ Plantillas por Submotivo (1 Clic)</div>
+        <div class="lc-section-title">⚡ Submotivos (Manda Saludo + Pregunta)</div>
         <div class="lc-submotivos-grid" id="lc-submotivos-list"></div>
       </div>
     `;
@@ -743,18 +828,18 @@
       const btn = document.createElement('button');
       btn.className = 'lc-submotivo-btn';
       btn.dataset.id = item.id;
-      btn.title = item.reply;
+      btn.title = `1° ${BASE_GREETING}\n2° ${item.question}`;
 
       btn.innerHTML = `
         <div class="lc-btn-top">
           <b>${item.name}</b>
         </div>
-        <div class="lc-btn-preview">${item.reply.replace(BASE_GREETING + ',', '').trim()}</div>
+        <div class="lc-btn-preview">1° Saludo ➔ 2° "${item.question}"</div>
       `;
 
       btn.addEventListener('click', () => {
         const detected = scanScreenForSubmotivo();
-        safeSendReply(item.reply, detected, false);
+        safeSendTwoStepReply(item.question, detected, false);
       });
 
       list.appendChild(btn);
