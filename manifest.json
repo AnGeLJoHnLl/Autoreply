@@ -1,15 +1,19 @@
 {
   "manifest_version": 3,
   "name": "Laraigo Auto-Reply Copilot",
-  "version": "1.0.0",
-  "description": "Automatización y asistente de respuestas rápidas para Laraigo Inbox (Claro).",
+  "version": "1.2.0",
+  "description": "Automatización inteligente para Laraigo Inbox (Claro): lee Submotivo, detecta capturas de TOA vs fotos de equipos y envía en 2 pasos.",
   "permissions": [
     "storage",
     "activeTab"
   ],
   "host_permissions": [
-    "*://*.laraigo.com/*"
+    "*://*.laraigo.com/*",
+    "<all_urls>"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Laraigo Auto-Reply Copilot"

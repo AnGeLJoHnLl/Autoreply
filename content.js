@@ -1,5 +1,9 @@
 // Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
-// Envía en 2 pasos: 1) Saludo ("Hola Técnico, Procederemos con la atención") y 2) Pregunta según Submotivo
+// 1° Envía siempre el Saludo: "Hola Técnico, Procederemos con la atención"
+// 2° Analiza el ticket completo (Submotivo + Imágenes):
+//    - Ignora fotos de equipos (cajas ZTE, routers, códigos de barra)
+//    - Si detecta captura de pantalla de app de celular (TOA) en Activaciones o Reenvío ➔ envía "un momento"
+//    - Si NO hay captura de app de celular ➔ envía "enviar error de toa" / "enviar captura de reenvio desde su toa"
 (function () {
   'use strict';
 
@@ -11,41 +15,46 @@
       id: "reenvio",
       name: "Reenvío de señal",
       keywords: ["reenvio"],
-      question: "enviar captura de reenvio desde su toa"
-    },
-    {
-      id: "cintillos",
-      name: "Consulta de Cintillos",
-      keywords: ["cintillo", "fat", "tap"],
-      question: "enviar cintillos y foto del fat/tap"
-    },
-    {
-      id: "mesh",
-      name: "Registro Mesh",
-      keywords: ["mesh", "repetidor"],
-      question: "enviar repetidor a activar"
-    },
-    {
-      id: "manto",
-      name: "SOT de Manto",
-      keywords: ["manto", "mantenimiento"],
-      question: "¿cuál es el motivo de la sot de manto?"
-    },
-    {
-      id: "pext",
-      name: "Derivación a PEXT",
-      keywords: ["pext", "derivacion", "planta externa"],
-      question: "enviar evidencias y motivo de la derivacion"
+      question: "enviar captura de reenvio desde su toa",
+      supportsAppScreenshotCheck: true
     },
     {
       id: "activaciones",
       name: "Activaciones",
       keywords: ["activacion", "activar"],
-      question: "enviar error de toa"
+      question: "enviar error de toa",
+      supportsAppScreenshotCheck: true
+    },
+    {
+      id: "cintillos",
+      name: "Consulta de Cintillos",
+      keywords: ["cintillo", "fat", "tap"],
+      question: "enviar cintillos y foto del fat/tap",
+      supportsAppScreenshotCheck: false
+    },
+    {
+      id: "mesh",
+      name: "Registro Mesh",
+      keywords: ["mesh", "repetidor"],
+      question: "enviar repetidor a activar",
+      supportsAppScreenshotCheck: false
+    },
+    {
+      id: "manto",
+      name: "SOT de Manto",
+      keywords: ["manto", "mantenimiento"],
+      question: "¿cuál es el motivo de la sot de manto?",
+      supportsAppScreenshotCheck: false
+    },
+    {
+      id: "pext",
+      name: "Derivación a PEXT",
+      keywords: ["pext", "derivacion", "planta externa"],
+      question: "enviar evidencias y motivo de la derivacion",
+      supportsAppScreenshotCheck: false
     }
   ];
 
-  // Quitar tildes y pasar a minúsculas
   function normalizeText(str) {
     return (str || '')
       .toLowerCase()
@@ -97,13 +106,191 @@
   let scannerLoopTimeout = null;
   let currentTicketIndex = 0;
 
+  // Caché de análisis de imágenes por URL para no recalcular la misma foto
+  const imageClassificationCache = new Map();
+
+  // ==============================================================
+  // ANALIZADOR VISUAL DE IMÁGENES DEL TICKET:
+  // Distingue "Foto de Equipo (ZTE/Router/Caja)" vs "Captura de App Celular (TOA)"
+  // ==============================================================
+  function getChatAttachmentImages() {
+    const widget = document.getElementById('laraigo-copilot-container');
+    const allImgs = Array.from(document.querySelectorAll('img'));
+
+    return allImgs.filter(img => {
+      if (widget && widget.contains(img)) return false;
+      if (img.offsetParent === null) return false;
+      const rect = img.getBoundingClientRect();
+      // Ignorar íconos pequeños, avatares de bot/agente o emojis (< 100px)
+      if (rect.width < 100 || rect.height < 100) return false;
+      const src = (img.src || '').toLowerCase();
+      if (!src || src.includes('avatar') || src.includes('emoji') || src.includes('logo')) return false;
+      return true;
+    });
+  }
+
+  function analyzePixelsFromImageSource(imgSource) {
+    const SIZE = 120;
+    const canvas = document.createElement('canvas');
+    canvas.width = SIZE;
+    canvas.height = SIZE;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(imgSource, 0, 0, SIZE, SIZE);
+
+    const imgData = ctx.getImageData(0, 0, SIZE, SIZE).data;
+    let flatStrictCount = 0;
+    let totalPairs = 0;
+    let uiBgCount = 0;
+    let darkUiCount = 0;
+    const totalPixels = SIZE * SIZE;
+
+    for (let y = 0; y < SIZE; y++) {
+      for (let x = 0; x < SIZE; x++) {
+        const idx = (y * SIZE + x) * 4;
+        const r = imgData[idx];
+        const g = imgData[idx + 1];
+        const b = imgData[idx + 2];
+
+        const maxC = Math.max(r, g, b);
+        const minC = Math.min(r, g, b);
+        const sat = maxC - minC;
+
+        // Píxeles neutros de interfaz (blanco/gris claro de TOA o modal de error)
+        if (sat <= 14 && minC > 130) {
+          uiBgCount++;
+        } else if (sat <= 12 && maxC < 45) {
+          darkUiCount++;
+        }
+
+        if (x < SIZE - 1) {
+          const idxNext = (y * SIZE + (x + 1)) * 4;
+          const r2 = imgData[idxNext];
+          const g2 = imgData[idxNext + 1];
+          const b2 = imgData[idxNext + 2];
+          const diff = Math.abs(r - r2) + Math.abs(g - g2) + Math.abs(b - b2);
+          if (diff <= 3) {
+            flatStrictCount++;
+          }
+          totalPairs++;
+        }
+      }
+    }
+
+    const flatStrictRatio = flatStrictCount / totalPairs;
+    const uiBgRatio = uiBgCount / totalPixels;
+    const darkUiRatio = darkUiCount / totalPixels;
+
+    // Una captura de pantalla de app móvil (TOA) tiene alta uniformidad digital (flatStrictRatio >= 0.55)
+    // y alto porcentaje de fondos neutros de interfaz (uiBgRatio >= 0.25 o >= 0.45).
+    // Una foto de cámara de un equipo/caja ZTE tiene ruido de sensor y sombras (uiBgRatio ~ 0.04, flatStrictRatio ~ 0.38).
+    const isAppScreenshot =
+      (flatStrictRatio >= 0.55 && uiBgRatio >= 0.25) ||
+      uiBgRatio >= 0.45 ||
+      (flatStrictRatio >= 0.68 && (uiBgRatio + darkUiRatio) >= 0.40);
+
+    return {
+      type: isAppScreenshot ? 'app_screenshot' : 'equipment_photo',
+      flatStrictRatio,
+      uiBgRatio
+    };
+  }
+
+  function classifySingleImageElement(imgEl) {
+    return new Promise((resolve) => {
+      const src = imgEl.src;
+      if (!src) {
+        resolve({ type: 'unknown' });
+        return;
+      }
+
+      if (imageClassificationCache.has(src)) {
+        resolve(imageClassificationCache.get(src));
+        return;
+      }
+
+      // Intentar análisis directo en canvas
+      try {
+        if (imgEl.complete && imgEl.naturalWidth > 0) {
+          const res = analyzePixelsFromImageSource(imgEl);
+          imageClassificationCache.set(src, res);
+          resolve(res);
+          return;
+        }
+      } catch (corsErr) {
+        // Si el servidor de imágenes de Laraigo tiene CORS, pedir el base64 al background worker
+      }
+
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: "fetchImageAsDataUrl", url: src }, (response) => {
+          if (response && response.ok && response.dataUrl) {
+            const tempImg = new Image();
+            tempImg.onload = () => {
+              try {
+                const res = analyzePixelsFromImageSource(tempImg);
+                imageClassificationCache.set(src, res);
+                resolve(res);
+              } catch (e) {
+                resolve({ type: 'unknown' });
+              }
+            };
+            tempImg.onerror = () => resolve({ type: 'unknown' });
+            tempImg.src = response.dataUrl;
+          } else {
+            // Fallback por proporción de pantalla de celular si no se pudo leer por red
+            const w = imgEl.naturalWidth || imgEl.clientWidth || 1;
+            const h = imgEl.naturalHeight || imgEl.clientHeight || 1;
+            const isVerticalPhoneScreen = (h / w) >= 1.55;
+            const fallbackRes = { type: isVerticalPhoneScreen ? 'app_screenshot' : 'equipment_photo' };
+            resolve(fallbackRes);
+          }
+        });
+      } else {
+        resolve({ type: 'unknown' });
+      }
+    });
+  }
+
+  async function analyzeAllTicketImages() {
+    const imgs = getChatAttachmentImages();
+    if (imgs.length === 0) {
+      return { totalImages: 0, appScreenshots: 0, equipmentPhotos: 0, hasAppScreenshot: false };
+    }
+
+    let appScreenshots = 0;
+    let equipmentPhotos = 0;
+
+    for (const img of imgs) {
+      const result = await classifySingleImageElement(img);
+      if (result.type === 'app_screenshot') {
+        appScreenshots++;
+      } else if (result.type === 'equipment_photo') {
+        equipmentPhotos++;
+      }
+    }
+
+    return {
+      totalImages: imgs.length,
+      appScreenshots,
+      equipmentPhotos,
+      hasAppScreenshot: appScreenshots > 0
+    };
+  }
+
+  // Determina cuál debe ser el 2° mensaje según el Submotivo y las imágenes presentes en el ticket
+  function resolveSecondMessage(rule, imageStats) {
+    if (!rule) return null;
+    if (rule.supportsAppScreenshotCheck && imageStats && imageStats.hasAppScreenshot) {
+      return "un momento";
+    }
+    return rule.question;
+  }
+
   // ==============================================================
   // LOCALIZAR CAJA DE TEXTO Y ENVIAR MENSAJE EN LARAIGO
   // ==============================================================
   function findChatInput() {
     const widget = document.getElementById('laraigo-copilot-container');
 
-    // 1. Textareas visibles (excluyendo nuestro widget)
     const textareas = Array.from(document.querySelectorAll('textarea'));
     for (const ta of textareas) {
       if (widget && widget.contains(ta)) continue;
@@ -112,7 +299,6 @@
       }
     }
 
-    // 2. Divs contenteditable visibles
     const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
     for (const ed of editables) {
       if (widget && widget.contains(ed)) continue;
@@ -121,7 +307,6 @@
       }
     }
 
-    // 3. Inputs de texto de chat
     const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'));
     for (const inp of inputs) {
       if (widget && widget.contains(inp)) continue;
@@ -135,12 +320,10 @@
     return null;
   }
 
-  // Buscar el botón o ícono de Enviar que está junto a la caja de texto de Laraigo
   function findSendButtonNearInput(inputElement) {
     if (!inputElement) return null;
     const widget = document.getElementById('laraigo-copilot-container');
 
-    // Subir hasta 4 niveles desde el input para encontrar el contenedor de la barra de mensaje
     let footerContainer = inputElement.parentElement;
     for (let level = 0; level < 4; level++) {
       if (!footerContainer || footerContainer === document.body) break;
@@ -152,7 +335,6 @@
         return true;
       });
 
-      // 1. Priorizar botón con atributo o ícono de envío explícito
       for (const el of candidates) {
         const clickable = el.closest('button, [role="button"], a') || el;
         const descriptor = (
@@ -176,13 +358,11 @@
         }
       }
 
-      // 2. Si hay botones dentro del mismo contenedor pequeño del input, el botón a la derecha del input suele ser Enviar
       const buttonsInRow = Array.from(footerContainer.querySelectorAll('button, [role="button"]')).filter(
         b => (!widget || !widget.contains(b)) && b.offsetParent !== null && !b.disabled
       );
       if (buttonsInRow.length > 0) {
         const inputRect = inputElement.getBoundingClientRect();
-        // Buscar botón ubicado a la derecha del input
         const rightButtons = buttonsInRow.filter(b => {
           const rect = b.getBoundingClientRect();
           return rect.left >= inputRect.right - 60 && Math.abs(rect.top - inputRect.top) < 100;
@@ -198,7 +378,6 @@
     return null;
   }
 
-  // Escribir texto en la caja de Laraigo compatible con React / Angular / Vue
   function setInputValue(target, text) {
     if (!target || !target.element) return false;
     const { element, type } = target;
@@ -233,7 +412,6 @@
     return (target.element.innerText || '').trim();
   }
 
-  // Simular clic real completo (mousedown + mouseup + click)
   function simulateRealClick(el) {
     if (!el) return;
     const opts = { bubbles: true, cancelable: true, view: window };
@@ -242,7 +420,6 @@
     el.click();
   }
 
-  // Simular Enter completo (keydown + keypress + keyup)
   function simulateEnterKey(el) {
     if (!el) return;
     el.focus();
@@ -259,7 +436,6 @@
     el.dispatchEvent(new KeyboardEvent('keypress', keyOpts));
     el.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
 
-    // Si está dentro de un <form>, disparar submit también
     const parentForm = el.closest('form');
     if (parentForm) {
       if (typeof parentForm.requestSubmit === 'function') {
@@ -270,7 +446,6 @@
     }
   }
 
-  // Pegar y enviar un mensaje individual garantizando que salga del input
   function pasteAndSendSingleMessage(text, callback) {
     const target = findChatInput();
     if (!target) {
@@ -279,14 +454,11 @@
       return;
     }
 
-    // 1. Pegar el texto
     setInputValue(target, text);
 
-    // 2. Esperar 150ms a que Laraigo habilite el envío y presionar Enter
     setTimeout(() => {
       simulateEnterKey(target.element);
 
-      // 3. Verificar tras 220ms si el texto ya se envió (caja vacía); si sigue ahí, hacer clic en el botón Enviar
       setTimeout(() => {
         const remainingText = getInputCurrentText(target);
         if (remainingText.length > 0) {
@@ -301,9 +473,11 @@
   }
 
   // ==============================================================
-  // ENVÍO EN 2 PASOS: 1° SALUDO ➔ 2° PREGUNTA DEL SUBMOTIVO
+  // ENVÍO INTELIGENTE EN 2 PASOS:
+  // 1° Envía SÍ O SÍ "Hola Técnico, Procederemos con la atención"
+  // 2° Analiza imágenes del ticket (ignora fotos de equipo, detecta app celular) y envía el 2° mensaje
   // ==============================================================
-  function safeSendTwoStepReply(questionText, detectedContext = null, force = false, onComplete = null) {
+  async function safeSendTwoStepSmartReply(ruleOrQuestion, detectedContext = null, force = false, onComplete = null) {
     if (isSendingLock) {
       showToast("⏳ Envío en curso, evitando duplicado...", "warning");
       if (onComplete) onComplete(false);
@@ -321,12 +495,11 @@
     const sot = detected?.sot || null;
     const sig = detected?.signature || null;
 
-    // Verificar filtro anti-duplicado antes de enviar
     if (!force) {
       if (doesCurrentChatAlreadyHaveResponse()) {
         askAgentConfirmation(
-          `⚠️ Este chat ya tiene respuesta enviada en pantalla. ¿Seguro que deseas volver a enviar los 2 mensajes?`,
-          () => safeSendTwoStepReply(questionText, detected, true, onComplete)
+          `⚠️ Este chat ya tiene respuesta enviada en pantalla. ¿Seguro que deseas volver a enviar?`,
+          () => safeSendTwoStepSmartReply(ruleOrQuestion, detected, true, onComplete)
         );
         return false;
       }
@@ -335,33 +508,42 @@
       if (storageCheck.answered) {
         askAgentConfirmation(
           `⚠️ Filtro Anti-Duplicado: ${storageCheck.reason} ¿Deseas enviarlo de todas formas?`,
-          () => safeSendTwoStepReply(questionText, detected, true, onComplete)
+          () => safeSendTwoStepSmartReply(ruleOrQuestion, detected, true, onComplete)
         );
         return false;
       }
     }
 
-    // Bloquear envíos duplicados mientras salen los 2 mensajes
     isSendingLock = true;
     markTicketAsAnswered(sot, sig);
 
-    showToast(`1/2 Enviando saludo...`, "info");
+    showToast(`1/2 Enviando saludo inicial...`, "info");
 
-    // PASO 1: Enviar el saludo "Hola Técnico, Procederemos con la atención"
-    pasteAndSendSingleMessage(BASE_GREETING, (step1Ok) => {
+    // PASO 1: Enviar SÍ O SÍ el saludo primero
+    pasteAndSendSingleMessage(BASE_GREETING, async (step1Ok) => {
       if (!step1Ok) {
         isSendingLock = false;
         if (onComplete) onComplete(false);
         return;
       }
 
-      // Esperar 1.1 segundos para que el primer mensaje salga limpio antes de mandar la pregunta
-      setTimeout(() => {
-        showToast(`2/2 Enviando: "${questionText}"`, "info");
+      // Mientras espera para mandar el 2° mensaje, analizar todas las imágenes del ticket
+      const imageStats = await analyzeAllTicketImages();
 
-        // PASO 2: Enviar la pregunta del submotivo
-        pasteAndSendSingleMessage(questionText, () => {
-          showToast(`✅ 2 mensajes enviados${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
+      let secondMessageText = typeof ruleOrQuestion === 'string'
+        ? ruleOrQuestion
+        : resolveSecondMessage(ruleOrQuestion, imageStats);
+
+      setTimeout(() => {
+        if (imageStats.hasAppScreenshot && typeof ruleOrQuestion === 'object' && ruleOrQuestion.supportsAppScreenshotCheck) {
+          showToast(`📱 Captura TOA detectada ➔ Enviando: "un momento"`, "info");
+        } else {
+          showToast(`2/2 Enviando: "${secondMessageText}"`, "info");
+        }
+
+        // PASO 2: Enviar "un momento" (si ya mandó captura de app) o la solicitud del submotivo
+        pasteAndSendSingleMessage(secondMessageText, () => {
+          showToast(`✅ Atención enviada${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
           setTimeout(() => {
             isSendingLock = false;
             if (onComplete) onComplete(true);
@@ -569,7 +751,7 @@
   }
 
   // ==========================================
-  // MOTOR DE AUTO-ESCANEO CON PAUSA EN CASUÍSTICAS
+  // MOTOR DE AUTO-ESCANEO CON ANÁLISIS DE IMÁGENES
   // ==========================================
   function toggleScanner() {
     isScanningQueue = !isScanningQueue;
@@ -580,8 +762,8 @@
     if (isScanningQueue) {
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "Iniciando escaneo en 2 pasos (Saludo + Pregunta)...";
-      showToast("🔍 Escaneo iniciado", "info");
+      badge.innerText = "Escaneando Submotivos e Imágenes TOA...";
+      showToast("🔍 Escaneo inteligente iniciado", "info");
       currentTicketIndex = 0;
       runNextScannerStep();
     } else {
@@ -626,13 +808,14 @@
         currentTicketIndex++;
         scannerLoopTimeout = setTimeout(runNextScannerStep, 2200);
       });
-    }, 1600);
+    }, 1700);
   }
 
-  function processCurrentOpenTicket(onDone) {
+  async function processCurrentOpenTicket(onDone) {
     const badge = document.getElementById('lc-scanner-status');
     const detected = scanScreenForSubmotivo();
-    updateDetectedPreview(detected);
+    const imageStats = await analyzeAllTicketImages();
+    updateDetectedPreview(detected, imageStats);
 
     if (doesCurrentChatAlreadyHaveResponse()) {
       if (detected) markTicketAsAnswered(detected.sot, detected.signature);
@@ -667,7 +850,7 @@
       askAgentConfirmation(
         `❓ CASUÍSTICA DETECTADA:\n${detected.casuistica || 'No se pudo determinar la plantilla.'}\n\nElige una plantilla manualmente abajo o presiona "Omitir / Cancelar" para saltar al siguiente ticket.`,
         detected.rule ? () => {
-          safeSendTwoStepReply(detected.rule.question, detected, true, () => onDone());
+          safeSendTwoStepSmartReply(detected.rule, detected, true, () => onDone());
         } : null,
         () => {
           skippedTickets.add(detected.signature);
@@ -677,11 +860,12 @@
       return;
     }
 
-    badge.innerText = `🎯 SOT ${detected.sot || ''} (${detected.rawSubmotivo}) ➔ Enviando 1° Saludo y 2° Pregunta...`;
-    safeSendTwoStepReply(detected.rule.question, detected, true, () => onDone());
+    const secondMsg = resolveSecondMessage(detected.rule, imageStats);
+    badge.innerText = `🎯 SOT ${detected.sot || ''} ➔ 1° Saludo + 2° "${secondMsg}"`;
+    safeSendTwoStepSmartReply(detected.rule, detected, true, () => onDone());
   }
 
-  function updateDetectedPreview(detected) {
+  function updateDetectedPreview(detected, imageStats = null) {
     const previewEl = document.getElementById('lc-live-detected');
     if (!previewEl) return;
 
@@ -713,17 +897,31 @@
 
     if (detected && detected.rule) {
       const sotBadge = detected.sot ? ` | <b>SOT: ${detected.sot}</b>` : '';
+      const secondMsg = resolveSecondMessage(detected.rule, imageStats);
+
+      let imgSummaryHtml = '';
+      if (detected.rule.supportsAppScreenshotCheck && imageStats) {
+        if (imageStats.hasAppScreenshot) {
+          imgSummaryHtml = `<div style="margin-top:4px; color:#047857; font-size:11px;">📱 <b>Captura de App (TOA) detectada</b>${imageStats.equipmentPhotos > 0 ? ` (${imageStats.equipmentPhotos} foto de equipo ignorada)` : ''} ➔ Dirá <b>"un momento"</b></div>`;
+        } else if (imageStats.equipmentPhotos > 0) {
+          imgSummaryHtml = `<div style="margin-top:4px; color:#b45309; font-size:11px;">📷 Solo foto de equipo (${imageStats.equipmentPhotos}) sin captura TOA ➔ Pedirá captura</div>`;
+        } else {
+          imgSummaryHtml = `<div style="margin-top:4px; color:#64748b; font-size:11px;">🖼️ Sin captura de App TOA ➔ Pedirá captura</div>`;
+        }
+      }
+
       previewEl.innerHTML = `
         <div class="lc-detected-box found">
           <div>🎯 Leído: <b>Submotivo: ${detected.rawSubmotivo}</b>${sotBadge}</div>
+          ${imgSummaryHtml}
           <button id="lc-quick-send-detected" class="lc-quick-send-btn">
-            🚀 Enviar (1° Saludo + 2° "${detected.rule.question}")
+            🚀 Enviar: 1° Saludo ➔ 2° "${secondMsg}"
           </button>
         </div>
       `;
       const qBtn = document.getElementById('lc-quick-send-detected');
       if (qBtn) {
-        qBtn.onclick = () => safeSendTwoStepReply(detected.rule.question, detected, false);
+        qBtn.onclick = () => safeSendTwoStepSmartReply(detected.rule, detected, false);
       }
 
       const matchingBtn = document.querySelector(`.lc-submotivo-btn[data-id="${detected.rule.id}"]`);
@@ -731,7 +929,7 @@
     } else {
       previewEl.innerHTML = `
         <div class="lc-detected-box waiting">
-          🔍 Abre un chat para leer la línea <code>Submotivo: ...</code>
+          🔍 Abre un chat para analizar <code>Submotivo:</code> e imágenes TOA
         </div>
       `;
     }
@@ -742,10 +940,11 @@
     const observer = new MutationObserver(() => {
       if (isScanningQueue || isSendingLock) return;
       clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
+      debounceTimer = setTimeout(async () => {
         const detected = scanScreenForSubmotivo();
-        updateDetectedPreview(detected);
-      }, 500);
+        const imageStats = await analyzeAllTicketImages();
+        updateDetectedPreview(detected, imageStats);
+      }, 600);
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
@@ -763,7 +962,7 @@
     container.innerHTML = `
       <div class="lc-header" id="lc-drag-handle">
         <div class="lc-title">
-          <span class="lc-badge">CLARO SOPORTE</span> Envío 2 Pasos
+          <span class="lc-badge">CLARO SOPORTE</span> Detector TOA + 2 Pasos
         </div>
         <div class="lc-actions">
           <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar">_</button>
@@ -780,10 +979,10 @@
           </div>
         </div>
 
-        <!-- Detector en tiempo real del mensaje abierto -->
+        <!-- Detector en tiempo real del mensaje e imágenes abiertas -->
         <div id="lc-live-detected">
           <div class="lc-detected-box waiting">
-            🔍 Abre un chat para leer la línea <code>Submotivo: ...</code>
+            🔍 Abre un chat para analizar <code>Submotivo:</code> e imágenes TOA
           </div>
         </div>
 
@@ -793,11 +992,11 @@
             ▶️ Auto-Escanear Tickets Pendientes
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            1° Manda Saludo ➔ 2° Manda Pregunta del Submotivo
+            Ignora fotos de equipos. Si ya hay captura de App TOA, manda "un momento"
           </div>
         </div>
 
-        <div class="lc-section-title">⚡ Submotivos (Manda Saludo + Pregunta)</div>
+        <div class="lc-section-title">⚡ Submotivos Manuales (1° Saludo + 2° Auto/Pregunta)</div>
         <div class="lc-submotivos-grid" id="lc-submotivos-list"></div>
       </div>
     `;
@@ -828,18 +1027,19 @@
       const btn = document.createElement('button');
       btn.className = 'lc-submotivo-btn';
       btn.dataset.id = item.id;
-      btn.title = `1° ${BASE_GREETING}\n2° ${item.question}`;
+      const note = item.supportsAppScreenshotCheck ? ' (o "un momento" si hay captura TOA)' : '';
+      btn.title = `1° ${BASE_GREETING}\n2° ${item.question}${note}`;
 
       btn.innerHTML = `
         <div class="lc-btn-top">
           <b>${item.name}</b>
         </div>
-        <div class="lc-btn-preview">1° Saludo ➔ 2° "${item.question}"</div>
+        <div class="lc-btn-preview">2° "${item.question}"${item.supportsAppScreenshotCheck ? ' / "un momento"' : ''}</div>
       `;
 
       btn.addEventListener('click', () => {
         const detected = scanScreenForSubmotivo();
-        safeSendTwoStepReply(item.question, detected, false);
+        safeSendTwoStepSmartReply(item, detected, false);
       });
 
       list.appendChild(btn);
