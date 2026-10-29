@@ -1,5 +1,5 @@
 // Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
-// Extrae exclusivamente la línea "Submotivo: ..." del mensaje del técnico
+// Con Filtro Anti-Duplicados (por SOT + Historial DOM + Storage) y Consulta en Casuísticas
 (function () {
   'use strict';
 
@@ -45,7 +45,7 @@
     }
   ];
 
-  // Quitar tildes y pasar a minúsculas para comparar sin errores
+  // Quitar tildes y pasar a minúsculas
   function normalizeText(str) {
     return (str || '')
       .toLowerCase()
@@ -54,8 +54,49 @@
       .trim();
   }
 
+  // ==============================================================
+  // FILTRO ANTI-DUPLICADOS PERSISTENTE (SOT + FIRMA DE TICKET)
+  // ==============================================================
+  let answeredRegistry = {}; // { "SOT_92138252": timestamp, "SIG_...": timestamp }
+  let skippedTickets = new Set(); // Tickets omitidos por el agente en esta sesión
+  let isSendingLock = false; // Candado para evitar doble clic o doble envío simultáneo
+
+  // Cargar historial de SOTs ya respondidas desde chrome.storage.local
+  chrome.storage.local.get(["laraigo_answered_registry"], (res) => {
+    if (res.laraigo_answered_registry) {
+      // Limpiar registros de más de 24 horas para no llenar memoria
+      const now = Date.now();
+      const cleaned = {};
+      for (const [key, ts] of Object.entries(res.laraigo_answered_registry)) {
+        if (now - ts < 24 * 60 * 60 * 1000) {
+          cleaned[key] = ts;
+        }
+      }
+      answeredRegistry = cleaned;
+      chrome.storage.local.set({ laraigo_answered_registry: answeredRegistry });
+    }
+  });
+
+  function markTicketAsAnswered(sot, signature) {
+    const now = Date.now();
+    if (sot) answeredRegistry[`SOT_${sot}`] = now;
+    if (signature) answeredRegistry[`SIG_${signature}`] = now;
+    chrome.storage.local.set({ laraigo_answered_registry: answeredRegistry });
+  }
+
+  function wasTicketAlreadyAnsweredInStorage(sot, signature) {
+    if (sot && answeredRegistry[`SOT_${sot}`]) {
+      return { answered: true, reason: `La SOT ${sot} ya fue respondida anteriormente.` };
+    }
+    if (signature && answeredRegistry[`SIG_${signature}`]) {
+      return { answered: true, reason: `Este ticket ya fue respondido anteriormente.` };
+    }
+    return { answered: false };
+  }
+
   // Estado del escáner continuo de tickets
   let isScanningQueue = false;
+  let isPausedForQuestion = false;
   let scannerLoopTimeout = null;
   let currentTicketIndex = 0;
 
@@ -169,110 +210,233 @@
     return false;
   }
 
-  function sendReply(text, andSend = true) {
+  // Envío protegido con candado anti-doble-envío
+  function safeSendReply(text, detectedContext = null, force = false) {
+    if (isSendingLock) {
+      showToast("⏳ Envío en curso, evitando duplicado...", "warning");
+      return false;
+    }
+
     const target = findChatInput();
     if (!target) {
       showToast("⚠️ Abre el chat del técnico primero", "warning");
       return false;
     }
 
+    const detected = detectedContext || scanScreenForSubmotivo();
+    const sot = detected?.sot || null;
+    const sig = detected?.signature || null;
+
+    // Verificar si ya se envió antes (salvo que el asesor fuerce el reenvío explícitamente)
+    if (!force) {
+      if (doesCurrentChatAlreadyHaveResponse()) {
+        askAgentConfirmation(
+          `⚠️ Este chat ya tiene el mensaje "Hola Técnico, Procederemos con la atención" en pantalla. ¿Seguro que deseas enviarlo otra vez?`,
+          () => safeSendReply(text, detected, true)
+        );
+        return false;
+      }
+
+      const storageCheck = wasTicketAlreadyAnsweredInStorage(sot, sig);
+      if (storageCheck.answered) {
+        askAgentConfirmation(
+          `⚠️ Filtro Anti-Duplicado: ${storageCheck.reason} ¿Deseas enviarlo de todas formas?`,
+          () => safeSendReply(text, detected, true)
+        );
+        return false;
+      }
+    }
+
+    // Activar candado por 3 segundos
+    isSendingLock = true;
+    markTicketAsAnswered(sot, sig);
+
     setInputValue(target, text);
 
-    if (andSend) {
+    setTimeout(() => {
+      triggerSend(target);
+      showToast(`🚀 Enviado${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
       setTimeout(() => {
-        triggerSend(target);
-        showToast("🚀 Mensaje enviado al técnico", "success");
-      }, 250);
-    } else {
-      showToast("✏️ Texto insertado en el chat", "info");
-    }
+        isSendingLock = false;
+      }, 2500);
+    }, 300);
+
     return true;
   }
 
   // ==============================================================
-  // EXTRACCIÓN ESTRICTA DE "Submotivo: ..." DEL MENSAJE DEL TÉCNICO
+  // EXTRACCIÓN ESTRICTA DE "Submotivo: ..." Y DETECCIÓN DE CASUÍSTICAS
   // ==============================================================
   function extractSubmotivoFromText(rawText) {
     if (!rawText) return null;
 
-    // Busca específicamente la línea "Submotivo: <valor>" ignorando "Tipo:" o "Motivo:"
-    const regex = /submotivo\s*:\s*([^\r\n]+)/i;
-    const match = rawText.match(regex);
-    if (!match || !match[1]) return null;
+    // Contar cuántas veces aparece "Submotivo:" en el texto para detectar múltiples plantillas
+    const allSubmotivoMatches = [...rawText.matchAll(/submotivo\s*:\s*([^\r\n]+)/gi)];
+    if (allSubmotivoMatches.length === 0) return null;
 
-    const rawSubmotivoValue = match[1].trim();
+    // Tomar el último Submotivo enviado por el técnico
+    const lastMatch = allSubmotivoMatches[allSubmotivoMatches.length - 1];
+    const rawSubmotivoValue = (lastMatch[1] || '').trim();
     const normalizedValue = normalizeText(rawSubmotivoValue);
 
-    if (!normalizedValue || normalizedValue === 'null') return null;
+    // Extraer SOT y Nombre del técnico para el filtro anti-duplicados
+    const sotMatches = [...rawText.matchAll(/SOT\s*[:#-]?\s*(\d{5,12})/gi)];
+    const sotNumber = sotMatches.length > 0 ? sotMatches[sotMatches.length - 1][1] : null;
 
-    // Extraer opcionalmente SOT para mostrar en el widget
-    const sotMatch = rawText.match(/SOT\s+(\d+)/i);
-    const sotNumber = sotMatch ? sotMatch[1] : null;
+    const techMatch = rawText.match(/t[eé]cnico\s+([A-ZÁÉÍÓÚÑ\s]{5,50}?)\s+del\s+departamento/i);
+    const techName = techMatch ? techMatch[1].trim() : null;
 
+    const signature = `${techName || 'TECH'}_${sotNumber || 'NOSOT'}_${normalizedValue}`;
+
+    // Detectar si hay múltiples submotivos distintos en el mismo chat (casuística)
+    const uniqueSubmotivos = new Set(allSubmotivoMatches.map(m => normalizeText(m[1])));
+    const hasMultipleDifferentSubmotivos = uniqueSubmotivos.size > 1;
+
+    // Si el submotivo dice "null", está vacío o es muy corto
+    if (!normalizedValue || normalizedValue === 'null' || normalizedValue === 'ninguno') {
+      return {
+        rule: null,
+        rawSubmotivo: rawSubmotivoValue || 'null (vacío)',
+        sot: sotNumber,
+        techName,
+        signature,
+        casuistica: `El campo Submotivo vino vacío o "null"${sotNumber ? ' en la SOT ' + sotNumber : ''}.`
+      };
+    }
+
+    // Buscar regla coincidente
+    let matchedRules = [];
     for (const rule of SUBMOTIVO_MAP) {
       if (rule.keywords.some(kw => normalizedValue.includes(normalizeText(kw)))) {
-        return {
-          rule,
-          rawSubmotivo: rawSubmotivoValue,
-          sot: sotNumber
-        };
+        matchedRules.push(rule);
       }
     }
 
+    if (hasMultipleDifferentSubmotivos) {
+      return {
+        rule: matchedRules[0] || null,
+        rawSubmotivo: rawSubmotivoValue,
+        sot: sotNumber,
+        techName,
+        signature,
+        casuistica: `El técnico envió ${uniqueSubmotivos.size} plantillas con submotivos distintos (${Array.from(uniqueSubmotivos).join(' / ')}). Confirma cuál responder.`
+      };
+    }
+
+    if (matchedRules.length === 0) {
+      return {
+        rule: null,
+        rawSubmotivo: rawSubmotivoValue,
+        sot: sotNumber,
+        techName,
+        signature,
+        casuistica: `Submotivo no reconocido en las 6 reglas: "${rawSubmotivoValue}".`
+      };
+    }
+
     return {
-      rule: null,
+      rule: matchedRules[0],
       rawSubmotivo: rawSubmotivoValue,
-      sot: sotNumber
+      sot: sotNumber,
+      techName,
+      signature,
+      casuistica: null
     };
   }
 
   function scanScreenForSubmotivo() {
-    // 1. Buscar en los mensajes del chat el bloque que contiene "Submotivo:"
+    const widget = document.getElementById('laraigo-copilot-container');
     const candidateNodes = document.querySelectorAll(
       '[class*="message"], [class*="bubble"], [class*="chat"], p, div, span'
     );
 
+    let combinedChatText = '';
     for (const node of candidateNodes) {
       if (node.offsetParent === null) continue;
+      if (widget && widget.contains(node)) continue;
       const text = node.innerText || '';
       if (/submotivo\s*:/i.test(text)) {
-        const result = extractSubmotivoFromText(text);
-        if (result && result.rule) {
-          return result;
-        }
+        combinedChatText += '\n' + text;
       }
     }
 
-    // Fallback: escanear el texto completo del body si está fragmentado
-    const bodyText = document.body.innerText || '';
-    if (/submotivo\s*:/i.test(bodyText)) {
-      const result = extractSubmotivoFromText(bodyText);
-      if (result) return result;
+    if (combinedChatText) {
+      return extractSubmotivoFromText(combinedChatText);
     }
 
     return null;
   }
 
   // ==========================================
-  // COMPROBAR SI EL CHAT ACTUAL YA TIENE RESPUESTA
+  // COMPROBAR SI EL CHAT ACTUAL YA TIENE RESPUESTA EN PANTALLA
   // ==========================================
   function doesCurrentChatAlreadyHaveResponse() {
-    const bodyText = normalizeText(document.body.innerText || '');
-    // Evitar contar el texto de nuestros propios botones del widget
     const widget = document.getElementById('laraigo-copilot-container');
     const chatContainers = Array.from(document.querySelectorAll(
-      '[class*="message"], [class*="bubble"], [class*="chat-item"], div[class*="msg"]'
+      '[class*="message"], [class*="bubble"], [class*="chat-item"], div[class*="msg"], p, span'
     ));
+
+    const knownPhrases = [
+      "hola tecnico, procederemos con la atencion",
+      "enviar error de toa",
+      "enviar captura de reenvio desde su toa",
+      "enviar cintillos y foto del fat/tap",
+      "enviar repetidor a activar",
+      "cual es el motivo de la sot de manto",
+      "enviar evidencias y motivo de la derivacion"
+    ];
 
     for (const msg of chatContainers) {
       if (widget && widget.contains(msg)) continue;
       const text = normalizeText(msg.innerText || '');
-      if (text.includes("hola tecnico, procederemos con la atencion")) {
+      if (knownPhrases.some(phrase => text.includes(phrase))) {
+        return true;
+      }
+    }
+
+    // También revisar si la caja de texto ya tiene escrito el mensaje sin enviar
+    const input = findChatInput();
+    if (input && input.element) {
+      const currentInputVal = normalizeText(input.element.value || input.element.innerText || '');
+      if (currentInputVal.includes("hola tecnico")) {
         return true;
       }
     }
 
     return false;
+  }
+
+  // ==========================================
+  // SISTEMA DE PREGUNTA / CONFIRMACIÓN EN CASUÍSTICAS
+  // ==========================================
+  function askAgentConfirmation(questionText, onConfirm, onSkip = null) {
+    isPausedForQuestion = true;
+    const modal = document.getElementById('lc-casuistica-modal');
+    const msgEl = document.getElementById('lc-casuistica-text');
+    const btnConfirm = document.getElementById('lc-casuistica-confirm');
+    const btnCancel = document.getElementById('lc-casuistica-cancel');
+
+    if (!modal || !msgEl) return;
+
+    msgEl.innerText = questionText;
+    modal.style.display = 'block';
+
+    if (onConfirm) {
+      btnConfirm.style.display = 'inline-block';
+      btnConfirm.onclick = () => {
+        modal.style.display = 'none';
+        isPausedForQuestion = false;
+        onConfirm();
+      };
+    } else {
+      btnConfirm.style.display = 'none';
+    }
+
+    btnCancel.onclick = () => {
+      modal.style.display = 'none';
+      isPausedForQuestion = false;
+      if (onSkip) onSkip();
+    };
   }
 
   // ==========================================
@@ -311,18 +475,19 @@
   }
 
   // ==========================================
-  // MOTOR DE AUTO-ESCANEO ENTRE TICKETS
+  // MOTOR DE AUTO-ESCANEO CON PAUSA EN CASUÍSTICAS
   // ==========================================
   function toggleScanner() {
     isScanningQueue = !isScanningQueue;
+    isPausedForQuestion = false;
     const btn = document.getElementById('lc-btn-scanner');
     const badge = document.getElementById('lc-scanner-status');
 
     if (isScanningQueue) {
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "Buscando tickets sin responder...";
-      showToast("🔍 Escaneo automático iniciado", "info");
+      badge.innerText = "Iniciando escaneo seguro (anti-duplicados activo)...";
+      showToast("🔍 Escaneo seguro iniciado", "info");
       currentTicketIndex = 0;
       runNextScannerStep();
     } else {
@@ -335,13 +500,13 @@
   }
 
   function runNextScannerStep() {
-    if (!isScanningQueue) return;
+    if (!isScanningQueue || isPausedForQuestion) return;
 
     const tickets = getInboxTicketElements();
     const badge = document.getElementById('lc-scanner-status');
 
     if (tickets.length === 0) {
-      badge.innerText = "Revisando chat abierto actual...";
+      badge.innerText = "Verificando chat actual...";
       processCurrentOpenTicket(() => {
         scannerLoopTimeout = setTimeout(runNextScannerStep, 3000);
       });
@@ -349,58 +514,116 @@
     }
 
     if (currentTicketIndex >= tickets.length) {
-      badge.innerText = `Ciclo completado (${tickets.length} tickets). Re-escaneando...`;
+      badge.innerText = `Ciclo completado (${tickets.length} tickets). Vigilando nuevos...`;
       currentTicketIndex = 0;
-      scannerLoopTimeout = setTimeout(runNextScannerStep, 3500);
+      scannerLoopTimeout = setTimeout(runNextScannerStep, 4000);
       return;
     }
 
     const ticketEl = tickets[currentTicketIndex];
-    badge.innerText = `Abriendo ticket ${currentTicketIndex + 1} de ${tickets.length}...`;
+    badge.innerText = `Revisando ticket ${currentTicketIndex + 1} de ${tickets.length}...`;
 
     ticketEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     ticketEl.click();
 
     scannerLoopTimeout = setTimeout(() => {
-      if (!isScanningQueue) return;
+      if (!isScanningQueue || isPausedForQuestion) return;
       processCurrentOpenTicket(() => {
         currentTicketIndex++;
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 2000);
+        scannerLoopTimeout = setTimeout(runNextScannerStep, 2200);
       });
-    }, 1500);
+    }, 1600);
   }
 
   function processCurrentOpenTicket(onDone) {
     const badge = document.getElementById('lc-scanner-status');
+    const detected = scanScreenForSubmotivo();
+    updateDetectedPreview(detected);
 
+    // 1. Filtro DOM: ¿Ya está nuestro mensaje en la pantalla del chat?
     if (doesCurrentChatAlreadyHaveResponse()) {
-      badge.innerText = `Ticket ya tiene respuesta. Saltando...`;
+      if (detected) markTicketAsAnswered(detected.sot, detected.signature);
+      badge.innerText = `✅ Ya respondido en chat. Saltando al siguiente...`;
       onDone();
       return;
     }
 
-    const detected = scanScreenForSubmotivo();
-    updateDetectedPreview(detected);
-
-    if (detected && detected.rule) {
-      badge.innerText = `🎯 Submotivo: "${detected.rawSubmotivo}" ➔ Enviando respuesta...`;
-      sendReply(detected.rule.reply, true);
-      setTimeout(onDone, 1000);
-    } else if (detected && !detected.rule) {
-      badge.innerText = `⚠️ Submotivo "${detected.rawSubmotivo}" sin regla asignada.`;
+    // 2. Si no hay mensaje de técnico con formato de plantilla
+    if (!detected) {
+      badge.innerText = `🔍 Sin plantilla de técnico en este chat. Saltando...`;
       onDone();
-    } else {
-      badge.innerText = `🔍 Sin línea "Submotivo:" visible en este chat.`;
-      onDone();
+      return;
     }
+
+    // 3. Filtro Storage: ¿Ya habíamos respondido esta SOT antes?
+    const storageCheck = wasTicketAlreadyAnsweredInStorage(detected.sot, detected.signature);
+    if (storageCheck.answered) {
+      badge.innerText = `🛡️ Anti-duplicado: SOT ${detected.sot || ''} ya fue atendida. Saltando...`;
+      onDone();
+      return;
+    }
+
+    // 4. ¿Fue omitido manualmente por el agente?
+    if (skippedTickets.has(detected.signature)) {
+      badge.innerText = `⏭️ Ticket omitido previamente. Saltando...`;
+      onDone();
+      return;
+    }
+
+    // 5. ¿Hay alguna CASUÍSTICA dudosa? -> PAUSAR Y PREGUNTAR AL ASESOR
+    if (detected.casuistica || !detected.rule) {
+      badge.innerText = `⚠️ Pausado: Casuística requiere tu decisión`;
+      showToast("⚠️ Casuística detectada: revisa el panel", "warning");
+
+      askAgentConfirmation(
+        `❓ CASUÍSTICA DETECTADA:\n${detected.casuistica || 'No se pudo determinar la plantilla.'}\n\nElige una plantilla manualmente abajo o presiona "Omitir / Cancelar" para saltar al siguiente ticket.`,
+        detected.rule ? () => {
+          safeSendReply(detected.rule.reply, detected, true);
+          setTimeout(onDone, 2500);
+        } : null,
+        () => {
+          skippedTickets.add(detected.signature);
+          onDone();
+        }
+      );
+      return;
+    }
+
+    // 6. Todo claro y verificado -> Enviar 1 sola vez
+    badge.innerText = `🎯 SOT ${detected.sot || ''} (${detected.rawSubmotivo}) ➔ Enviando 1 mensaje...`;
+    safeSendReply(detected.rule.reply, detected, true);
+    setTimeout(onDone, 2800);
   }
 
   function updateDetectedPreview(detected) {
     const previewEl = document.getElementById('lc-live-detected');
     if (!previewEl) return;
 
-    // Limpiar resaltados previos
     document.querySelectorAll('.lc-submotivo-btn').forEach(b => b.classList.remove('highlighted'));
+
+    const alreadyInDom = doesCurrentChatAlreadyHaveResponse();
+    const alreadyInStorage = detected ? wasTicketAlreadyAnsweredInStorage(detected.sot, detected.signature).answered : false;
+    const isAlreadyAttended = alreadyInDom || alreadyInStorage;
+
+    if (detected && isAlreadyAttended) {
+      previewEl.innerHTML = `
+        <div class="lc-detected-box attended">
+          🛡️ <b>YA ATENDIDO</b> ${detected.sot ? `(SOT: ${detected.sot})` : ''}<br>
+          <small>Submotivo: ${detected.rawSubmotivo} — Bloqueado para no enviar doble.</small>
+        </div>
+      `;
+      return;
+    }
+
+    if (detected && detected.casuistica) {
+      previewEl.innerHTML = `
+        <div class="lc-detected-box unknown">
+          ⚠️ <b>Casuística:</b> ${detected.casuistica}<br>
+          <small>Selecciona manualmente qué responder abajo:</small>
+        </div>
+      `;
+      return;
+    }
 
     if (detected && detected.rule) {
       const sotBadge = detected.sot ? ` | <b>SOT: ${detected.sot}</b>` : '';
@@ -408,23 +631,17 @@
         <div class="lc-detected-box found">
           <div>🎯 Leído: <b>Submotivo: ${detected.rawSubmotivo}</b>${sotBadge}</div>
           <button id="lc-quick-send-detected" class="lc-quick-send-btn">
-            🚀 Enviar ahora: "${detected.rule.reply}"
+            🚀 Enviar 1 vez: "${detected.rule.reply}"
           </button>
         </div>
       `;
       const qBtn = document.getElementById('lc-quick-send-detected');
       if (qBtn) {
-        qBtn.onclick = () => sendReply(detected.rule.reply, true);
+        qBtn.onclick = () => safeSendReply(detected.rule.reply, detected, false);
       }
 
       const matchingBtn = document.querySelector(`.lc-submotivo-btn[data-id="${detected.rule.id}"]`);
       if (matchingBtn) matchingBtn.classList.add('highlighted');
-    } else if (detected && detected.rawSubmotivo) {
-      previewEl.innerHTML = `
-        <div class="lc-detected-box unknown">
-          ⚠️ Submotivo leído: <b>${detected.rawSubmotivo}</b> (Selecciona plantilla abajo)
-        </div>
-      `;
     } else {
       previewEl.innerHTML = `
         <div class="lc-detected-box waiting">
@@ -443,7 +660,7 @@
       debounceTimer = setTimeout(() => {
         const detected = scanScreenForSubmotivo();
         updateDetectedPreview(detected);
-      }, 600);
+      }, 500);
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
@@ -461,7 +678,7 @@
     container.innerHTML = `
       <div class="lc-header" id="lc-drag-handle">
         <div class="lc-title">
-          <span class="lc-badge">CLARO SOPORTE</span> Lector de Submotivo
+          <span class="lc-badge">CLARO SOPORTE</span> Anti-Duplicado
         </div>
         <div class="lc-actions">
           <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar">_</button>
@@ -469,6 +686,15 @@
       </div>
 
       <div class="lc-body" id="lc-body">
+        <!-- Modal de Pregunta ante Casuísticas o Duplicados -->
+        <div id="lc-casuistica-modal" class="lc-casuistica-modal" style="display: none;">
+          <div id="lc-casuistica-text" class="lc-casuistica-text"></div>
+          <div class="lc-casuistica-actions">
+            <button id="lc-casuistica-confirm" class="lc-btn-confirm">✅ Sí, Enviar</button>
+            <button id="lc-casuistica-cancel" class="lc-btn-cancel">⏭️ Omitir / Cancelar</button>
+          </div>
+        </div>
+
         <!-- Detector en tiempo real del mensaje abierto -->
         <div id="lc-live-detected">
           <div class="lc-detected-box waiting">
@@ -482,7 +708,7 @@
             ▶️ Auto-Escanear Tickets Pendientes
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            Ignora "Tipo:" y "Motivo:", lee solo "Submotivo:"
+            🛡️ Filtro activo: 1 solo mensaje por SOT + Pregunta en casuísticas
           </div>
         </div>
 
@@ -527,7 +753,8 @@
       `;
 
       btn.addEventListener('click', () => {
-        sendReply(item.reply, true);
+        const detected = scanScreenForSubmotivo();
+        safeSendReply(item.reply, detected, false);
       });
 
       list.appendChild(btn);

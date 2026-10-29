@@ -4,7 +4,7 @@
   position: fixed;
   bottom: 20px;
   right: 20px;
-  width: 350px;
+  width: 355px;
   background: #ffffff;
   border-radius: 12px;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.22), 0 3px 10px rgba(0, 0, 0, 0.1);
@@ -68,7 +68,7 @@
 
 .lc-body {
   padding: 12px;
-  max-height: 480px;
+  max-height: 500px;
   overflow-y: auto;
   transition: max-height 0.25s ease-out, opacity 0.2s;
 }
@@ -79,6 +79,62 @@
   padding-bottom: 0;
   opacity: 0;
   pointer-events: none;
+}
+
+/* Modal de Pregunta en Casuísticas o Duplicados */
+.lc-casuistica-modal {
+  background: #fffbeb;
+  border: 2px solid #f59e0b;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.2);
+}
+
+.lc-casuistica-text {
+  font-size: 12px;
+  color: #78350f;
+  font-weight: 600;
+  white-space: pre-line;
+  line-height: 1.35;
+  margin-bottom: 8px;
+}
+
+.lc-casuistica-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.lc-btn-confirm {
+  flex: 1;
+  background: #d97706;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.lc-btn-confirm:hover {
+  background: #b45309;
+}
+
+.lc-btn-cancel {
+  flex: 1;
+  background: #e5e7eb;
+  color: #374151;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lc-btn-cancel:hover {
+  background: #d1d5db;
 }
 
 /* Cuadro de lectura de "Submotivo:" en tiempo real */
@@ -100,6 +156,12 @@
   background: #ecfdf5;
   border: 1px solid #34d399;
   color: #065f46;
+}
+
+.lc-detected-box.attended {
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  color: #1e40af;
 }
 
 .lc-detected-box.unknown {
