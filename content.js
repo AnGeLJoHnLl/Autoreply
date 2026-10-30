@@ -1,9 +1,9 @@
 // Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
 // Incluye:
-// - Botón para Desactivar/Activar de forma independiente por pestaña (ideal cuando se usan 2 ventanas/pestañas)
-// - Widget arrastrable para no tapar el chat
+// - Auto-Scroll dentro del chat (sube al inicio para leer "Submotivo:" y baja al final para analizar fotos TOA y respuestas)
+// - Auto-Scroll y recorrido de tickets en la columna "Asignados(X)" de Laraigo
+// - Botón para Desactivar/Activar de forma independiente por pestaña ("🔌 Apagar aquí")
 // - 1° Saludo fijo ➔ 2° Análisis de Submotivo + Detector de Capturas de App TOA ("un momento")
-// - Triple filtro anti-duplicado sincronizado en tiempo real entre pestañas (por SOT y por N° de Ticket Laraigo)
 (function () {
   'use strict';
 
@@ -62,8 +62,12 @@
       .trim();
   }
 
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   // ==============================================================
-  // ESTADO INDEPENDIENTE POR PESTAÑA (Permite apagar en 1 pestaña y usar en otra)
+  // ESTADO INDEPENDIENTE POR PESTAÑA
   // ==============================================================
   let isDisabledInThisTab = sessionStorage.getItem('laraigo_copilot_tab_disabled') === 'true';
   let manualObserver = null;
@@ -89,7 +93,6 @@
     }
   });
 
-  // Escuchar en vivo si la otra pestaña ya respondió un ticket/SOT
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.laraigo_answered_registry?.newValue) {
       answeredRegistry = changes.laraigo_answered_registry.newValue;
@@ -123,6 +126,79 @@
   let currentTicketIndex = 0;
 
   const imageClassificationCache = new Map();
+
+  // ==============================================================
+  // AUTO-SCROLL DENTRO DE LA CONVERSACIÓN DEL CHAT
+  // Sube al inicio para leer el "Submotivo:" y baja para cargar todas las fotos
+  // ==============================================================
+  function findChatMessagesScrollContainer() {
+    const widget = document.getElementById('laraigo-copilot-container');
+    const allDivs = Array.from(document.querySelectorAll('div'));
+
+    let bestCandidate = null;
+    let maxScore = 0;
+
+    for (const div of allDivs) {
+      if (widget && widget.contains(div)) continue;
+      if (div.offsetParent === null) continue;
+
+      const style = window.getComputedStyle(div);
+      const overflowY = style.overflowY;
+      if (overflowY !== 'auto' && overflowY !== 'scroll') continue;
+      if (div.clientHeight < 150 || div.clientWidth < 180) continue;
+
+      const rect = div.getBoundingClientRect();
+      // El área central de chat en Laraigo está a la derecha de la lista de Asignados (left > 140)
+      if (rect.left < 100) continue;
+
+      // Verificar si contiene burbujas de mensajes o texto de conversación
+      const text = (div.innerText || '').toLowerCase();
+      const hasChatIndicators =
+        text.includes('mensaje entregado') ||
+        text.includes('submotivo:') ||
+        text.includes('hola, soy el') ||
+        text.includes('hola técnico') ||
+        div.querySelectorAll('img').length > 0;
+
+      if (hasChatIndicators && div.scrollHeight >= div.clientHeight) {
+        const score = div.clientHeight * (div.scrollHeight > div.clientHeight ? 2 : 1);
+        if (score > maxScore) {
+          maxScore = score;
+          bestCandidate = div;
+        }
+      }
+    }
+
+    return bestCandidate;
+  }
+
+  // Hace scroll arriba -> medio -> abajo en el chat abierto para capturar todo el historial e imágenes
+  async function scrollChatAndCollectFullData() {
+    const scrollContainer = findChatMessagesScrollContainer();
+    let collectedText = '';
+
+    if (scrollContainer && scrollContainer.scrollHeight > scrollContainer.clientHeight + 30) {
+      // 1. Subir al tope del chat donde está la plantilla inicial con "Submotivo:"
+      scrollContainer.scrollTop = 0;
+      await sleep(350);
+      collectedText += '\n' + (scrollContainer.innerText || '');
+
+      // 2. Pasar por el medio para que carguen imágenes intermedias
+      scrollContainer.scrollTop = Math.floor(scrollContainer.scrollHeight / 2);
+      await sleep(250);
+      collectedText += '\n' + (scrollContainer.innerText || '');
+
+      // 3. Bajar al final del chat para ver las últimas imágenes y mensajes enviados
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      await sleep(350);
+      collectedText += '\n' + (scrollContainer.innerText || '');
+    }
+
+    const screenSubmotivo = scanScreenForSubmotivo(collectedText);
+    const imageStats = await analyzeAllTicketImages();
+
+    return { detected: screenSubmotivo, imageStats };
+  }
 
   // ==============================================================
   // ANALIZADOR VISUAL DE IMÁGENES DEL TICKET:
@@ -482,9 +558,7 @@
   }
 
   // ==============================================================
-  // ENVÍO INTELIGENTE EN 2 PASOS:
-  // Si el saludo "Hola Técnico, Procederemos con la atención" YA está en el chat
-  // (por ej. enviado por otra macro), solo envía el 2° mensaje para no duplicar el saludo.
+  // ENVÍO INTELIGENTE EN 2 PASOS
   // ==============================================================
   async function safeSendTwoStepSmartReply(ruleOrQuestion, detectedContext = null, force = false, onComplete = null) {
     if (isDisabledInThisTab) return false;
@@ -536,14 +610,11 @@
     markTicketAsAnswered(sot, ticketNum, sig);
 
     const greetingAlreadyPresent = doesCurrentChatAlreadyHaveGreeting();
-
-    // Analizar las imágenes del ticket antes del 2° mensaje
     const imageStats = await analyzeAllTicketImages();
     const secondMessageText = typeof ruleOrQuestion === 'string'
       ? ruleOrQuestion
       : resolveSecondMessage(ruleOrQuestion, imageStats);
 
-    // Si el saludo ya estaba en el chat (ej. enviado por Monitoreo Activo), no duplicar el saludo; mandar solo el 2° mensaje
     if (greetingAlreadyPresent && !force) {
       showToast(`Saludo ya presente ➔ Enviando: "${secondMessageText}"`, "info");
       pasteAndSendSingleMessage(secondMessageText, () => {
@@ -556,7 +627,6 @@
       return true;
     }
 
-    // PASO 1: Enviar SÍ O SÍ el saludo primero
     showToast(`1/2 Enviando saludo inicial...`, "info");
     pasteAndSendSingleMessage(BASE_GREETING, (step1Ok) => {
       if (!step1Ok) {
@@ -572,7 +642,6 @@
           showToast(`2/2 Enviando: "${secondMessageText}"`, "info");
         }
 
-        // PASO 2: Enviar "un momento" o la pregunta del submotivo
         pasteAndSendSingleMessage(secondMessageText, () => {
           showToast(`✅ Atención enviada${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
           setTimeout(() => {
@@ -672,13 +741,13 @@
     };
   }
 
-  function scanScreenForSubmotivo() {
+  function scanScreenForSubmotivo(extraCollectedText = '') {
     const widget = document.getElementById('laraigo-copilot-container');
     const candidateNodes = document.querySelectorAll(
       '[class*="message"], [class*="bubble"], [class*="chat"], p, div, span'
     );
 
-    let combinedChatText = '';
+    let combinedChatText = extraCollectedText || '';
     for (const node of candidateNodes) {
       if (node.offsetParent === null) continue;
       if (widget && widget.contains(node)) continue;
@@ -782,10 +851,73 @@
     };
   }
 
-  // ==========================================
-  // DETECCIÓN DE LA LISTA DE TICKETS (BANDEJA)
-  // ==========================================
+  // ==============================================================
+  // DETECCIÓN Y SCROLL DE LA COLUMNA "Asignados(X)" DE LARAIGO
+  // ==============================================================
   function getInboxTicketElements() {
+    const widget = document.getElementById('laraigo-copilot-container');
+
+    // 1. Buscar la pestaña "Asignados(X)" en la esquina superior izquierda de Laraigo
+    const allElements = Array.from(document.querySelectorAll('div, span, a, button, li'));
+    let asignadosTabEl = null;
+    for (const el of allElements) {
+      if (widget && widget.contains(el)) continue;
+      const txt = (el.innerText || '').trim();
+      if (/^Asignados\s*\(\d+\)$/i.test(txt)) {
+        asignadosTabEl = el;
+        break;
+      }
+    }
+
+    // Si encontramos la columna de "Asignados(X)", buscar las tarjetas de tickets justo debajo de esa barra
+    if (asignadosTabEl) {
+      const tabRect = asignadosTabEl.getBoundingClientRect();
+      // Subir hasta encontrar el contenedor de toda la columna izquierda (alto > 250px)
+      let leftColumn = asignadosTabEl.parentElement;
+      for (let i = 0; i < 6; i++) {
+        if (!leftColumn || leftColumn === document.body) break;
+        if (leftColumn.clientHeight > 250) break;
+        leftColumn = leftColumn.parentElement;
+      }
+
+      if (leftColumn) {
+        // Hacer scroll en la lista izquierda si tiene barra de desplazamiento
+        const scrollableList = Array.from(leftColumn.querySelectorAll('div')).find(
+          d => d.scrollHeight > d.clientHeight + 20 && d.clientHeight > 150
+        );
+        if (scrollableList && currentTicketIndex === 0) {
+          scrollableList.scrollTop = 0;
+        }
+
+        // Buscar cada tarjeta de ticket ubicada debajo de la pestaña "Asignados"
+        const candidateCards = Array.from(leftColumn.querySelectorAll('div, li, a')).filter(el => {
+          if (widget && widget.contains(el)) return false;
+          if (el.offsetParent === null) return false;
+          const r = el.getBoundingClientRect();
+          // Debe estar debajo de la barra "Asignados" (r.top > tabRect.bottom - 5)
+          // y en la columna izquierda (r.left < 220, ancho entre 110 y 340, alto de tarjeta entre 48 y 140)
+          if (r.top < tabRect.bottom - 2) return false;
+          if (r.left > 180) return false;
+          if (r.width < 110 || r.width > 340) return false;
+          if (r.height < 48 || r.height > 135) return false;
+
+          const text = (el.innerText || '').trim();
+          if (text.length < 4 || text.length > 260) return false;
+          return true;
+        });
+
+        // Filtrar contenedores padres duplicados (quedarnos con las tarjetas fila de nivel superior)
+        const uniqueRowCards = candidateCards.filter(card => {
+          return !candidateCards.some(other => other !== card && other.contains(card));
+        });
+
+        if (uniqueRowCards.length > 0) {
+          return uniqueRowCards;
+        }
+      }
+    }
+
+    // 2. Fallback por selectores clásicos
     const candidateSelectors = [
       'div[class*="conversation-item"]',
       'div[class*="chat-item"]',
@@ -800,25 +932,19 @@
     ];
 
     for (const sel of candidateSelectors) {
-      const list = Array.from(document.querySelectorAll(sel)).filter(el => el.offsetParent !== null);
+      const list = Array.from(document.querySelectorAll(sel)).filter(
+        el => (!widget || !widget.contains(el)) && el.offsetParent !== null
+      );
       if (list.length > 0) {
         return list;
       }
-    }
-
-    const leftPanel = document.querySelector('aside, div[class*="sidebar"], div[class*="inbox"], div[class*="list"]');
-    if (leftPanel) {
-      const items = Array.from(leftPanel.querySelectorAll('div > div')).filter(el => {
-        return el.offsetParent !== null && el.innerText && el.innerText.length > 5 && el.innerText.length < 250 && el.querySelector('p, span, b');
-      });
-      if (items.length > 0) return items.slice(0, 15);
     }
 
     return [];
   }
 
   // ==========================================
-  // MOTOR DE AUTO-ESCANEO CON ANÁLISIS DE IMÁGENES
+  // MOTOR DE AUTO-ESCANEO Y SCROLL DE CHATS
   // ==========================================
   function stopScannerIfRunning() {
     if (isScanningQueue) {
@@ -829,7 +955,7 @@
       const badge = document.getElementById('lc-scanner-status');
       if (btn) {
         btn.classList.remove('active');
-        btn.innerText = "▶️ Auto-Escanear Tickets Pendientes";
+        btn.innerText = "▶️ Auto-Escanear y Scrollear Chats";
       }
       if (badge) {
         badge.innerText = "Escáner en pausa";
@@ -847,8 +973,8 @@
     if (isScanningQueue) {
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "Escaneando Submotivos e Imágenes TOA...";
-      showToast("🔍 Escaneo inteligente iniciado en esta pestaña", "info");
+      badge.innerText = "Recorriendo Asignados y scrolleando chats...";
+      showToast("🔍 Auto-Scroll de chats iniciado", "info");
       currentTicketIndex = 0;
       runNextScannerStep();
     } else {
@@ -864,7 +990,7 @@
     const badge = document.getElementById('lc-scanner-status');
 
     if (tickets.length === 0) {
-      badge.innerText = "Verificando chat abierto...";
+      badge.innerText = "Scrolleando y revisando chat abierto actual...";
       processCurrentOpenTicket(() => {
         scannerLoopTimeout = setTimeout(runNextScannerStep, 3000);
       });
@@ -872,17 +998,17 @@
     }
 
     if (currentTicketIndex >= tickets.length) {
-      badge.innerText = `Ciclo completado (${tickets.length} tickets). Vigilando nuevos...`;
+      badge.innerText = `Ciclo completado (${tickets.length} chats). Vigilando nuevos...`;
       currentTicketIndex = 0;
-      scannerLoopTimeout = setTimeout(runNextScannerStep, 4000);
+      scannerLoopTimeout = setTimeout(runNextScannerStep, 3500);
       return;
     }
 
     const ticketEl = tickets[currentTicketIndex];
-    badge.innerText = `Revisando ticket ${currentTicketIndex + 1} de ${tickets.length}...`;
+    badge.innerText = `Abriendo chat ${currentTicketIndex + 1} de ${tickets.length} en Asignados...`;
 
     ticketEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    ticketEl.click();
+    simulateRealClick(ticketEl);
 
     scannerLoopTimeout = setTimeout(() => {
       if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) return;
@@ -890,7 +1016,7 @@
         currentTicketIndex++;
         scannerLoopTimeout = setTimeout(runNextScannerStep, 2200);
       });
-    }, 1700);
+    }, 1400);
   }
 
   async function processCurrentOpenTicket(onDone) {
@@ -903,8 +1029,8 @@
       return;
     }
 
-    const detected = scanScreenForSubmotivo();
-    const imageStats = await analyzeAllTicketImages();
+    badge.innerText = `↕️ Scrolleando el chat para leer Submotivo y fotos...`;
+    const { detected, imageStats } = await scrollChatAndCollectFullData();
     updateDetectedPreview(detected, imageStats);
 
     if (doesCurrentChatAlreadyHaveSecondQuestion()) {
@@ -1078,7 +1204,6 @@
     }
   }
 
-  // Hacer que el widget se pueda arrastrar desde el encabezado
   function makeWidgetDraggable(widgetEl, handleEl) {
     let isDragging = false;
     let startX = 0, startY = 0, initialLeft = 0, initialTop = 0;
@@ -1123,7 +1248,6 @@
   function initUI() {
     if (document.getElementById('laraigo-copilot-container')) return;
 
-    // 1. Crear pastilla discreta cuando está desactivado en esta pestaña
     const disabledPill = document.createElement('button');
     disabledPill.id = 'laraigo-disabled-pill';
     disabledPill.className = 'laraigo-disabled-pill';
@@ -1133,7 +1257,6 @@
     disabledPill.addEventListener('click', () => setTabDisabledState(false));
     document.body.appendChild(disabledPill);
 
-    // 2. Crear contenedor principal del widget
     const container = document.createElement('div');
     container.id = 'laraigo-copilot-container';
     container.className = 'laraigo-copilot-widget';
@@ -1169,13 +1292,13 @@
           </div>
         </div>
 
-        <!-- Control de Auto-Escaneo de Bandeja -->
+        <!-- Control de Auto-Escaneo y Scroll de Bandeja -->
         <div class="lc-scanner-panel">
           <button id="lc-btn-scanner" class="lc-btn-scanner">
-            ▶️ Auto-Escanear Tickets Pendientes
+            ▶️ Auto-Escanear y Scrollear Chats
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            Ignora fotos de equipos. Si hay captura de App TOA, manda "un momento"
+            Recorre "Asignados", sube/baja el scroll del chat y responde
           </div>
         </div>
 
