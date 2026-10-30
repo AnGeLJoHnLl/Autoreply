@@ -1,20 +1,34 @@
 // ============================================================================
-// Laraigo Auto-Reply Copilot - Page Network Bridge (MAIN World)
-// Intercepta de forma pasiva las respuestas de claroapi.laraigo.com (/main, /multi, /ticket/reply)
-// para leer tickets asignados, plantillas Submotivo e interacciones JSON sin necesidad
-// de scrollear, y permite enviar respuestas directo por API (/api/ticket/reply).
+// Laraigo Auto-Reply Copilot - Page Network Bridge (MAIN World) v1.8
+// Trabaja 100% en segundo plano por API (sin cambiar de chat ni scrollear):
+//   1. Captura el Bearer Token y las plantillas de consulta de /api/main y /api/multi
+//   2. Consulta tickets en Asignados (UFN_CONVERSATION_SEL_TICKETSBYUSER)
+//   3. Consulta mensajes y Submotivo de cualquier conversación (UFN_CONVERSATION_SEL_INTERACTION + PERSON_SEL)
+//   4. Envía el saludo (0s) y la 2° respuesta (5s) directo a POST /api/ticket/reply
 // ============================================================================
 
 (function () {
   if (window.__laraigoCopilotBridgeInstalled) return;
   window.__laraigoCopilotBridgeInstalled = true;
 
-  let capturedBearerToken = null;
+  let capturedBearerToken = localStorage.getItem('__lc_bearer_token') || null;
   let apiOrigin = 'https://claroapi.laraigo.com';
 
-  // Plantillas de parámetros aprendidas automáticamente de las peticiones reales de Laraigo
   let learnedInteractionMethodTemplate = null;
   let learnedPersonMethodTemplate = null;
+  let learnedTicketsQueryTemplate = null;
+  let learnedTicketsQueryEndpoint = '/api/main';
+
+  try {
+    const savedInt = localStorage.getItem('__lc_tpl_interaction');
+    if (savedInt) learnedInteractionMethodTemplate = JSON.parse(savedInt);
+    const savedPer = localStorage.getItem('__lc_tpl_person');
+    if (savedPer) learnedPersonMethodTemplate = JSON.parse(savedPer);
+    const savedTkt = localStorage.getItem('__lc_tpl_tickets');
+    if (savedTkt) learnedTicketsQueryTemplate = JSON.parse(savedTkt);
+    const savedEnd = localStorage.getItem('__lc_tpl_tickets_ep');
+    if (savedEnd) learnedTicketsQueryEndpoint = savedEnd;
+  } catch (e) {}
 
   function generateUUID() {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -39,11 +53,13 @@
   function saveAuthHeaderIfValid(headerVal) {
     if (typeof headerVal === 'string' && headerVal.toLowerCase().startsWith('bearer ')) {
       capturedBearerToken = headerVal.trim();
+      try {
+        localStorage.setItem('__lc_bearer_token', capturedBearerToken);
+      } catch (e) {}
       postToContentScript('AUTH_CAPTURED', { hasToken: true });
     }
   }
 
-  // Analizar el cuerpo enviado a /api/multi para aprender los nombres de parámetros exactos
   function inspectOutgoingBody(url, bodyStr) {
     if (!bodyStr || typeof bodyStr !== 'string') return;
     try {
@@ -54,20 +70,44 @@
       if (!url.includes('/multi') && !url.includes('/main')) return;
 
       const parsed = JSON.parse(bodyStr);
-      const items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.data) ? parsed.data : [parsed]);
+      const isArray = Array.isArray(parsed);
+      const items = isArray ? parsed : (Array.isArray(parsed?.data) ? parsed.data : [parsed]);
+
       for (const item of items) {
         if (!item || typeof item !== 'object') continue;
-        if (item.method === 'UFN_CONVERSATION_SEL_INTERACTION' && item.parameters) {
+        const method = String(item.method || '');
+        const key = String(item.key || '');
+
+        if (method === 'UFN_CONVERSATION_SEL_INTERACTION' && item.parameters) {
           learnedInteractionMethodTemplate = JSON.parse(JSON.stringify(item));
+          try {
+            localStorage.setItem('__lc_tpl_interaction', JSON.stringify(learnedInteractionMethodTemplate));
+          } catch (e) {}
         }
-        if (item.method === 'UFN_CONVERSATION_PERSON_SEL' && item.parameters) {
+
+        if (method === 'UFN_CONVERSATION_PERSON_SEL' && item.parameters) {
           learnedPersonMethodTemplate = JSON.parse(JSON.stringify(item));
+          try {
+            localStorage.setItem('__lc_tpl_person', JSON.stringify(learnedPersonMethodTemplate));
+          } catch (e) {}
+        }
+
+        if (
+          (method.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER') || key.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER')) &&
+          !key.includes('_CLOSED_') &&
+          !key.includes('_PAUSED_')
+        ) {
+          learnedTicketsQueryTemplate = isArray ? [JSON.parse(JSON.stringify(item))] : JSON.parse(JSON.stringify(item));
+          learnedTicketsQueryEndpoint = url.includes('/multi') ? '/api/multi' : '/api/main';
+          try {
+            localStorage.setItem('__lc_tpl_tickets', JSON.stringify(learnedTicketsQueryTemplate));
+            localStorage.setItem('__lc_tpl_tickets_ep', learnedTicketsQueryEndpoint);
+          } catch (e) {}
         }
       }
     } catch (e) {}
   }
 
-  // Analizar las respuestas JSON de /api/main y /api/multi
   function inspectIncomingJsonResponse(url, json) {
     if (!json || typeof json !== 'object') return;
     try {
@@ -86,7 +126,7 @@
         const key = String(block.key || '');
         const rows = Array.isArray(block.data) ? block.data : [];
 
-        // 1. Lista de tickets en bandeja "Asignados" (excluyendo cerrados o pausados)
+        // 1. Lista de tickets en bandeja "Asignados"
         if (
           key.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER') &&
           !key.includes('_CLOSED_') &&
@@ -100,13 +140,15 @@
 
         // 2. Mensajes / interacciones dentro de un ticket
         if (key.startsWith('UFN_CONVERSATION_SEL_INTERACTION')) {
-          const convIdMatch = key.match(/UFN_CONVERSATION_SEL_INTERACTION_(\d+)/);
+          const convIdMatch = key.match(/(\d+)$/);
           const conversationid = convIdMatch ? Number(convIdMatch[1]) : null;
-          postToContentScript('INTERACTIONS', {
-            key,
-            conversationid,
-            interactions: rows
-          });
+          if (rows.length > 0 || block.success) {
+            postToContentScript('INTERACTIONS', {
+              key,
+              conversationid,
+              interactions: rows
+            });
+          }
         }
 
         // 3. Datos completos del técnico y variablecontext (incluye useranswer con SOT y Submotivo)
@@ -121,7 +163,7 @@
   }
 
   // ==========================================================================
-  // 1. HOOK XMLHttpRequest (usado por Axios / Laraigo index-*.js)
+  // 1. HOOK XMLHttpRequest
   // ==========================================================================
   const origOpen = XMLHttpRequest.prototype.open;
   const origSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
@@ -202,8 +244,106 @@
   }
 
   // ==========================================================================
-  // 3. COMANDOS DESDE CONTENT.JS: ENVÍO DIRECTO A /api/ticket/reply Y CONSULTA /api/multi
+  // 3. COMANDOS DESDE CONTENT.JS (100% EN SEGUNDO PLANO SIN TOCAR LA PANTALLA)
   // ==========================================================================
+  async function fetchConversationDetailsInBackground(conversationid, personid) {
+    if (!capturedBearerToken || !conversationid) {
+      return { ok: false, reason: 'MISSING_TOKEN_OR_CONVID' };
+    }
+
+    const multiPayload = [];
+
+    if (learnedInteractionMethodTemplate) {
+      const q = JSON.parse(JSON.stringify(learnedInteractionMethodTemplate));
+      q.key = `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`;
+      if (q.parameters) {
+        let replaced = false;
+        for (const k of Object.keys(q.parameters)) {
+          if (k.toLowerCase().includes('conversation')) {
+            q.parameters[k] = Number(conversationid);
+            replaced = true;
+          }
+        }
+        if (!replaced) {
+          q.parameters.p_conversationid = Number(conversationid);
+          q.parameters.conversationid = Number(conversationid);
+        }
+      }
+      multiPayload.push(q);
+    } else {
+      // Enviar variantes estándar para asegurar respuesta incluso antes de que el usuario abra algún ticket
+      multiPayload.push({
+        method: 'UFN_CONVERSATION_SEL_INTERACTION',
+        key: `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`,
+        parameters: {
+          p_conversationid: Number(conversationid),
+          conversationid: Number(conversationid)
+        }
+      });
+    }
+
+    if (personid) {
+      if (learnedPersonMethodTemplate) {
+        const pq = JSON.parse(JSON.stringify(learnedPersonMethodTemplate));
+        pq.key = 'UFN_CONVERSATION_PERSON_SEL';
+        if (pq.parameters) {
+          for (const k of Object.keys(pq.parameters)) {
+            if (k.toLowerCase().includes('personid')) pq.parameters[k] = Number(personid);
+            if (k.toLowerCase().includes('conversation')) pq.parameters[k] = Number(conversationid);
+          }
+        }
+        multiPayload.push(pq);
+      } else {
+        multiPayload.push({
+          method: 'UFN_CONVERSATION_PERSON_SEL',
+          key: 'UFN_CONVERSATION_PERSON_SEL',
+          parameters: {
+            p_personid: Number(personid),
+            personid: Number(personid),
+            p_conversationid: Number(conversationid),
+            conversationid: Number(conversationid)
+          }
+        });
+      }
+    }
+
+    const res = await origFetch(`${apiOrigin}/api/multi`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Authorization': capturedBearerToken
+      },
+      credentials: 'include',
+      body: JSON.stringify(multiPayload)
+    });
+
+    const resJson = await res.json();
+    inspectIncomingJsonResponse(`${apiOrigin}/api/multi`, resJson);
+
+    let interactions = [];
+    let person = null;
+
+    if (resJson && Array.isArray(resJson.data)) {
+      for (const block of resJson.data) {
+        if (!block || !Array.isArray(block.data)) continue;
+        const k = String(block.key || '');
+        if (k.startsWith('UFN_CONVERSATION_SEL_INTERACTION') && block.data.length > 0) {
+          interactions = block.data;
+        }
+        if (k.startsWith('UFN_CONVERSATION_PERSON_SEL') && block.data.length > 0) {
+          person = block.data[0];
+        }
+      }
+    }
+
+    return {
+      ok: res.ok,
+      interactions,
+      person
+    };
+  }
+
   window.addEventListener('message', async (event) => {
     if (event.source !== window || !event.data || event.data.source !== 'LARAIGO_CONTENT') return;
 
@@ -285,68 +425,29 @@
       }
     }
 
-    // Acción B: Consultar mensajes de una conversación sin abrirla en pantalla (/api/multi)
+    // Acción B: Consultar mensajes y Submotivo de una conversación en segundo plano
     if (action === 'FETCH_CONVERSATION_INTERACTIONS') {
       try {
-        if (!capturedBearerToken) {
-          postToContentScript('FETCH_INTERACTIONS_RESULT', {
-            requestId,
-            ok: false,
-            reason: 'NO_BEARER_TOKEN'
-          });
-          return;
-        }
-
         const { conversationid, personid } = payload || {};
-        if (!conversationid) {
-          postToContentScript('FETCH_INTERACTIONS_RESULT', {
-            requestId,
-            ok: false,
-            reason: 'NO_CONVERSATION_ID'
-          });
+        const result = await fetchConversationDetailsInBackground(conversationid, personid);
+        postToContentScript('FETCH_INTERACTIONS_RESULT', Object.assign({ requestId }, result));
+      } catch (err) {
+        postToContentScript('FETCH_INTERACTIONS_RESULT', {
+          requestId,
+          ok: false,
+          reason: String(err && err.message ? err.message : err)
+        });
+      }
+    }
+
+    // Acción C: Refrescar lista de tickets en Asignados en segundo plano
+    if (action === 'POLL_ASSIGNED_TICKETS') {
+      try {
+        if (!capturedBearerToken || !learnedTicketsQueryTemplate) {
+          postToContentScript('POLL_ASSIGNED_RESULT', { requestId, ok: false });
           return;
         }
-
-        let interactionQuery;
-        if (learnedInteractionMethodTemplate) {
-          interactionQuery = JSON.parse(JSON.stringify(learnedInteractionMethodTemplate));
-          interactionQuery.key = `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`;
-          if (interactionQuery.parameters) {
-            for (const k of Object.keys(interactionQuery.parameters)) {
-              if (k.toLowerCase().includes('conversationid')) {
-                interactionQuery.parameters[k] = Number(conversationid);
-              }
-            }
-          }
-        } else {
-          interactionQuery = {
-            method: 'UFN_CONVERSATION_SEL_INTERACTION',
-            key: `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`,
-            parameters: {
-              p_conversationid: Number(conversationid),
-              conversationid: Number(conversationid)
-            }
-          };
-        }
-
-        const multiPayload = [interactionQuery];
-
-        if (personid && learnedPersonMethodTemplate) {
-          const personQuery = JSON.parse(JSON.stringify(learnedPersonMethodTemplate));
-          if (personQuery.parameters) {
-            for (const k of Object.keys(personQuery.parameters)) {
-              if (k.toLowerCase().includes('personid')) {
-                personQuery.parameters[k] = Number(personid);
-              }
-              if (k.toLowerCase().includes('conversationid')) {
-                personQuery.parameters[k] = Number(conversationid);
-              }
-            }
-          }
-          multiPayload.push(personQuery);
-        }
-
-        const res = await origFetch(`${apiOrigin}/api/multi`, {
+        const res = await origFetch(`${apiOrigin}${learnedTicketsQueryEndpoint}`, {
           method: 'POST',
           headers: {
             'Accept': 'application/json',
@@ -354,23 +455,13 @@
             'Authorization': capturedBearerToken
           },
           credentials: 'include',
-          body: JSON.stringify(multiPayload)
+          body: JSON.stringify(learnedTicketsQueryTemplate)
         });
-
         const resJson = await res.json();
-        inspectIncomingJsonResponse(`${apiOrigin}/api/multi`, resJson);
-
-        postToContentScript('FETCH_INTERACTIONS_RESULT', {
-          requestId,
-          ok: res.ok,
-          data: resJson
-        });
-      } catch (err) {
-        postToContentScript('FETCH_INTERACTIONS_RESULT', {
-          requestId,
-          ok: false,
-          reason: String(err && err.message ? err.message : err)
-        });
+        inspectIncomingJsonResponse(`${apiOrigin}${learnedTicketsQueryEndpoint}`, resJson);
+        postToContentScript('POLL_ASSIGNED_RESULT', { requestId, ok: res.ok });
+      } catch (e) {
+        postToContentScript('POLL_ASSIGNED_RESULT', { requestId, ok: false });
       }
     }
   });

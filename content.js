@@ -135,6 +135,7 @@
   const apiInteractionsByConvId = new Map();
   const apiPersonByTicketNum = new Map();
   const apiGreetedTickets = new Set();
+  const backgroundTicketsInProgress = new Set();
   const notifiedTicketsLocalSet = new Set();
   const pendingBridgeRequests = new Map();
 
@@ -167,8 +168,13 @@
 
     const msg = event.data;
 
-    // 1. Respuesta a comandos enviados desde content.js (SEND_API_REPLY / FETCH_CONVERSATION_INTERACTIONS)
-    if ((msg.type === 'API_REPLY_RESULT' || msg.type === 'FETCH_INTERACTIONS_RESULT') && msg.requestId) {
+    // 1. Respuesta a comandos enviados desde content.js (SEND_API_REPLY / FETCH_CONVERSATION_INTERACTIONS / POLL_ASSIGNED)
+    if (
+      (msg.type === 'API_REPLY_RESULT' ||
+        msg.type === 'FETCH_INTERACTIONS_RESULT' ||
+        msg.type === 'POLL_ASSIGNED_RESULT') &&
+      msg.requestId
+    ) {
       const resolver = pendingBridgeRequests.get(msg.requestId);
       if (resolver) {
         pendingBridgeRequests.delete(msg.requestId);
@@ -191,36 +197,10 @@
           notifyNewTicketOnce(tNum, t.displayname || '');
         }
 
-        // Si el Auto-Escáner está activo y cae un ticket en ASIGNADO sin respuesta del asesor (lastreplyuser === null),
-        // enviamos el saludo de inmediato (0ms) directo a POST /api/ticket/reply sin esperar siquiera a que abra el chat
-        if (
-          !isDisabledInThisTab &&
-          isScanningQueue &&
-          !isPausedForQuestion &&
-          t.status === 'ASIGNADO' &&
-          !t.lastreplyuser &&
-          !apiGreetedTickets.has(tNum) &&
-          !wasTicketAlreadyAnsweredInStorage(null, tNum, null).answered
-        ) {
-          apiGreetedTickets.add(tNum);
-          sendMessageViaLaraigoApi(BASE_GREETING, t, true).then((ok) => {
-            if (ok) {
-              showToast(`⚡ Saludo enviado al instante (Ticket ${tNum})`, 'info');
-            } else {
-              apiGreetedTickets.delete(tNum);
-            }
-          });
+        // Si el modo automático está activo, procesa el ticket 100% en 2° plano por API (sin cambiar de chat ni scrollear)
+        if (!isDisabledInThisTab && isScanningQueue && !isPausedForQuestion && t.status === 'ASIGNADO') {
+          processTicketInBackgroundViaApi(t);
         }
-      }
-
-      // Despertar el escáner si estaba esperando tickets en Asignados(0)
-      if (!isDisabledInThisTab && isScanningQueue && !isPausedForQuestion && !isSendingLock && !isStepInProgress && msg.tickets.length > 0) {
-        clearTimeout(scannerLoopTimeout);
-        scannerLoopTimeout = setTimeout(() => {
-          if (isScanningQueue && !isPausedForQuestion && !isSendingLock && !isStepInProgress) {
-            runNextScannerStep();
-          }
-        }, 120);
       }
     }
 
@@ -246,7 +226,8 @@
           personcommunicationchannel: String(p.variablecontext?.personcommunicationchannel || ''),
           communicationchannelsite: String(p.variablecontext?.communicationchannelsite || '51915021111'),
           communicationchanneltype: 'WHAL',
-          postexternalid: null
+          postexternalid: null,
+          status: 'ASIGNADO'
         };
         apiTicketsByTicketNum.set(tNum, synthesized);
         apiTicketsByConvId.set(cId, synthesized);
@@ -332,6 +313,67 @@
           messageText,
           isFirstReply
         }
+      }, '*');
+    });
+  }
+
+  function fetchConversationDetailsViaBridge(conversationid, personid) {
+    if (!conversationid) return Promise.resolve({ ok: false, interactions: [], person: null });
+
+    const reqId = 'fetch_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingBridgeRequests.delete(reqId);
+        resolve({
+          ok: false,
+          interactions: apiInteractionsByConvId.get(Number(conversationid)) || [],
+          person: null
+        });
+      }, 3000);
+
+      pendingBridgeRequests.set(reqId, (res) => {
+        clearTimeout(timer);
+        if (res && Array.isArray(res.interactions) && res.interactions.length > 0) {
+          apiInteractionsByConvId.set(Number(conversationid), res.interactions);
+        }
+        if (res && res.person) {
+          const tNum = String(res.person.ticketnum || res.person.variablecontext?.ticketnum || '').trim();
+          if (tNum) apiPersonByTicketNum.set(tNum, res.person);
+        }
+        resolve({
+          ok: Boolean(res && res.ok),
+          interactions: res?.interactions || apiInteractionsByConvId.get(Number(conversationid)) || [],
+          person: res?.person || null
+        });
+      });
+
+      window.postMessage({
+        source: 'LARAIGO_CONTENT',
+        action: 'FETCH_CONVERSATION_INTERACTIONS',
+        requestId: reqId,
+        payload: { conversationid, personid }
+      }, '*');
+    });
+  }
+
+  function pollAssignedTicketsViaBridge() {
+    const reqId = 'poll_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingBridgeRequests.delete(reqId);
+        resolve(false);
+      }, 2500);
+
+      pendingBridgeRequests.set(reqId, (res) => {
+        clearTimeout(timer);
+        resolve(Boolean(res && res.ok));
+      });
+
+      window.postMessage({
+        source: 'LARAIGO_CONTENT',
+        action: 'POLL_ASSIGNED_TICKETS',
+        requestId: reqId,
+        payload: {}
       }, '*');
     });
   }
@@ -488,28 +530,22 @@
     return bestCandidate;
   }
 
-  async function scrollChatAndCollectFullData() {
+  // Recolectar datos completos del ticket por API sin mover el scroll de la pantalla
+  async function scrollChatAndCollectFullData(explicitTicketNum = null) {
+    const meta = getActiveTicketMeta(explicitTicketNum);
+    if (meta && meta.conversationid) {
+      await fetchConversationDetailsViaBridge(meta.conversationid, meta.personid);
+    }
+
     const scrollContainer = findChatMessagesScrollContainer();
-    let collectedText = '';
+    let collectedText = getApiCollectedTextForTicket(explicitTicketNum) || '';
 
-    if (scrollContainer) {
-      if (scrollContainer.scrollHeight > scrollContainer.clientHeight + 20) {
-        scrollContainer.scrollTop = 0;
-        await sleep(320);
-        collectedText += '\n' + (scrollContainer.innerText || '');
-
-        scrollContainer.scrollTop = Math.floor(scrollContainer.scrollHeight / 2);
-        await sleep(220);
-        collectedText += '\n' + (scrollContainer.innerText || '');
-
-        scrollContainer.scrollTop = scrollContainer.scrollHeight;
-        await sleep(320);
-      }
+    if (scrollContainer && (!explicitTicketNum || explicitTicketNum === getCurrentLaraigoTicketNumber())) {
       collectedText += '\n' + (scrollContainer.innerText || '');
     }
 
-    const detected = scanScreenForSubmotivo(collectedText);
-    const contextStats = await analyzeFullTicketContext(detected, collectedText);
+    const detected = scanScreenForSubmotivo(collectedText, explicitTicketNum);
+    const contextStats = await analyzeFullTicketContext(detected, collectedText, explicitTicketNum);
 
     return { detected, contextStats };
   }
@@ -636,6 +672,41 @@
     };
   }
 
+  function classifyImageUrlInMemory(src) {
+    return new Promise((resolve) => {
+      if (!src) {
+        resolve({ type: 'unknown' });
+        return;
+      }
+      if (imageClassificationCache.has(src)) {
+        resolve(imageClassificationCache.get(src));
+        return;
+      }
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: "fetchImageAsDataUrl", url: src }, (response) => {
+          if (response && response.ok && response.dataUrl) {
+            const tempImg = new Image();
+            tempImg.onload = () => {
+              try {
+                const res = analyzePixelsFromImageSource(tempImg);
+                imageClassificationCache.set(src, res);
+                resolve(res);
+              } catch (e) {
+                resolve({ type: 'unknown' });
+              }
+            };
+            tempImg.onerror = () => resolve({ type: 'unknown' });
+            tempImg.src = response.dataUrl;
+          } else {
+            resolve({ type: 'unknown' });
+          }
+        });
+      } else {
+        resolve({ type: 'unknown' });
+      }
+    });
+  }
+
   function classifySingleImageElement(imgEl) {
     return new Promise((resolve) => {
       const src = imgEl.src;
@@ -658,37 +729,26 @@
         }
       } catch (corsErr) {}
 
-      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({ action: "fetchImageAsDataUrl", url: src }, (response) => {
-          if (response && response.ok && response.dataUrl) {
-            const tempImg = new Image();
-            tempImg.onload = () => {
-              try {
-                const res = analyzePixelsFromImageSource(tempImg);
-                imageClassificationCache.set(src, res);
-                resolve(res);
-              } catch (e) {
-                resolve({ type: 'unknown' });
-              }
-            };
-            tempImg.onerror = () => resolve({ type: 'unknown' });
-            tempImg.src = response.dataUrl;
-          } else {
-            const w = imgEl.naturalWidth || imgEl.clientWidth || 1;
-            const h = imgEl.naturalHeight || imgEl.clientHeight || 1;
-            const isVerticalPhoneScreen = (h / w) >= 1.55;
-            resolve({ type: isVerticalPhoneScreen ? 'app_screenshot' : 'equipment_photo' });
-          }
-        });
-      } else {
-        resolve({ type: 'unknown' });
-      }
+      classifyImageUrlInMemory(src).then((res) => {
+        if (res && res.type !== 'unknown') {
+          resolve(res);
+        } else {
+          const w = imgEl.naturalWidth || imgEl.clientWidth || 1;
+          const h = imgEl.naturalHeight || imgEl.clientHeight || 1;
+          const isVerticalPhoneScreen = (h / w) >= 1.55;
+          resolve({ type: isVerticalPhoneScreen ? 'app_screenshot' : 'equipment_photo' });
+        }
+      });
     });
   }
 
-  function getCentralChatOnlyText(extraCollectedText = '') {
-    const apiText = getApiCollectedTextForTicket();
+  function getCentralChatOnlyText(extraCollectedText = '', explicitTicketNum = null) {
+    const apiText = getApiCollectedTextForTicket(explicitTicketNum);
     const baseText = (extraCollectedText || '') + (apiText ? '\n' + apiText : '');
+
+    if (explicitTicketNum && explicitTicketNum !== getCurrentLaraigoTicketNumber()) {
+      return baseText;
+    }
 
     const scrollContainer = findChatMessagesScrollContainer();
     if (scrollContainer) {
@@ -713,8 +773,8 @@
     return chatText;
   }
 
-  function analyzeTechnicianExtraText(detected, extraCollectedText = '') {
-    const rawChatText = getCentralChatOnlyText(extraCollectedText);
+  function analyzeTechnicianExtraText(detected, extraCollectedText = '', explicitTicketNum = null) {
+    const rawChatText = getCentralChatOnlyText(extraCollectedText, explicitTicketNum);
 
     let cleaned = rawChatText
       .replace(/Hola,\s*soy\s*el\s*t[eé]cnico[\s\S]*?Submotivo\s*:\s*[^\r\n]+/gi, ' ')
@@ -766,28 +826,79 @@
     };
   }
 
-  async function analyzeFullTicketContext(detected, extraCollectedText = '') {
-    const imgs = getChatAttachmentImages();
-    await waitForChatImagesToLoad(imgs, 1500);
+  async function analyzeFullTicketContext(detected, extraCollectedText = '', explicitTicketNum = null) {
+    const tNum = explicitTicketNum || detected?.ticketNum || getCurrentLaraigoTicketNumber();
+    const isCurrentlyOpenOnScreen = !explicitTicketNum || explicitTicketNum === getCurrentLaraigoTicketNumber();
 
     let appScreenshots = 0;
     let equipmentPhotos = 0;
+    let hasVideo = false;
+    const processedUrls = new Set();
 
-    for (const img of imgs) {
-      const result = await classifySingleImageElement(img);
-      if (result.type === 'app_screenshot') {
-        appScreenshots++;
-      } else {
-        equipmentPhotos++;
+    // 1. Analizar imágenes y videos desde el JSON de la API (UFN_CONVERSATION_SEL_INTERACTION) en memoria (sin cambiar de chat)
+    const meta = getActiveTicketMeta(tNum);
+    const convId = meta?.conversationid || 0;
+    if (convId && apiInteractionsByConvId.has(Number(convId))) {
+      const interactions = apiInteractionsByConvId.get(Number(convId)) || [];
+      for (const item of interactions) {
+        if (!item || item.usertype === 'ASESOR' || item.usertype === 'BOT' || item.interactiontype === 'LOG') continue;
+        const iType = String(item.interactiontype || '').toLowerCase();
+        const iText = String(item.interactiontext || '').trim();
+
+        if (iType.includes('video') || /\.(mp4|mov|3gp|avi|webm)(\?|$)/i.test(iText)) {
+          hasVideo = true;
+          continue;
+        }
+
+        const isImgInteraction =
+          iType.includes('image') ||
+          iType.includes('photo') ||
+          iType.includes('img') ||
+          /\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(iText) ||
+          (iType !== 'text' && /^https?:\/\//i.test(iText));
+
+        if (isImgInteraction) {
+          const urlMatch = iText.match(/https?:\/\/[^\s"'<>]+/i);
+          if (urlMatch && urlMatch[0]) {
+            const imgUrl = urlMatch[0];
+            processedUrls.add(imgUrl);
+            const cls = await classifyImageUrlInMemory(imgUrl);
+            if (cls.type === 'app_screenshot') {
+              appScreenshots++;
+            } else {
+              equipmentPhotos++;
+            }
+          } else {
+            equipmentPhotos++;
+          }
+        }
       }
     }
 
-    const hasVideo = hasVideoInChat();
-    const extraTextStats = analyzeTechnicianExtraText(detected, extraCollectedText);
+    // 2. Si el ticket también está abierto en la pantalla actual, complementar con las imágenes visibles (sin scrollear)
+    if (isCurrentlyOpenOnScreen) {
+      const imgs = getChatAttachmentImages();
+      await waitForChatImagesToLoad(imgs, 1200);
+      for (const img of imgs) {
+        if (img.src && processedUrls.has(img.src)) continue;
+        const result = await classifySingleImageElement(img);
+        if (result.type === 'app_screenshot') {
+          appScreenshots++;
+        } else {
+          equipmentPhotos++;
+        }
+      }
+      if (hasVideoInChat()) {
+        hasVideo = true;
+      }
+    }
+
+    const totalImages = appScreenshots + equipmentPhotos;
+    const extraTextStats = analyzeTechnicianExtraText(detected, extraCollectedText, tNum);
 
     return {
-      totalImages: imgs.length,
-      hasAnyImage: imgs.length > 0,
+      totalImages,
+      hasAnyImage: totalImages > 0,
       appScreenshots,
       equipmentPhotos,
       hasAppScreenshot: appScreenshots > 0,
@@ -1120,16 +1231,18 @@
     }
   }
 
-  // Pegar y enviar con verificación real de vaciado de la caja + respaldo directo por API (/api/ticket/reply)
+  // Enviar mensaje priorizando la API directa (/api/ticket/reply) para no tocar la caja de texto ni interrumpir al usuario
   async function pasteAndSendSingleMessage(text, callback) {
+    // 1. Intentar primero envío 100% silencioso por API (sin tocar el input ni el foco del usuario)
+    const apiSentFirst = await sendMessageViaLaraigoApi(text);
+    if (apiSentFirst) {
+      if (callback) callback(true);
+      return true;
+    }
+
+    // 2. Respaldo por DOM solo si aún no se capturó sesión de API
     const initialTarget = await waitForChatInputReady(2800);
     if (!initialTarget) {
-      // Si la caja no está en el DOM, intentar envío directo por API
-      const apiSent = await sendMessageViaLaraigoApi(text);
-      if (apiSent) {
-        if (callback) callback(true);
-        return true;
-      }
       showToast("⚠️ No se encontró la caja de chat habilitada", "warning");
       if (callback) callback(false);
       return false;
@@ -1363,7 +1476,7 @@
     return match ? match[1] : null;
   }
 
-  function extractSubmotivoFromText(rawText) {
+  function extractSubmotivoFromText(rawText, explicitTicketNum = null) {
     if (!rawText) return null;
 
     const allSubmotivoMatches = [...rawText.matchAll(/submotivo\s*:\s*([^\r\n]+)/gi)];
@@ -1376,7 +1489,7 @@
     const sotMatches = [...rawText.matchAll(/SOT\s*[:#-]?\s*(\d{5,12})/gi)];
     const sotNumber = sotMatches.length > 0 ? sotMatches[sotMatches.length - 1][1] : null;
 
-    const ticketNum = getCurrentLaraigoTicketNumber();
+    const ticketNum = explicitTicketNum || getCurrentLaraigoTicketNumber();
 
     const techMatch = rawText.match(/t[eé]cnico\s+([A-ZÁÉÍÓÚÑ\s]{5,50}?)\s+del\s+departamento/i);
     const techName = techMatch ? techMatch[1].trim() : null;
@@ -1440,27 +1553,32 @@
     };
   }
 
-  function scanScreenForSubmotivo(extraCollectedText = '') {
-    const { minLeft, maxRight } = getChatColumnBounds();
-    const candidateNodes = document.querySelectorAll(
-      '[class*="message"], [class*="bubble"], [class*="chat"], p, div, span'
-    );
-
-    const apiText = getApiCollectedTextForTicket();
+  function scanScreenForSubmotivo(extraCollectedText = '', explicitTicketNum = null) {
+    const apiText = getApiCollectedTextForTicket(explicitTicketNum);
     let combinedChatText = (apiText ? apiText + '\n' : '') + (extraCollectedText || '');
-    for (const node of candidateNodes) {
-      if (isElementInOurOverlay(node)) continue;
-      if (node.offsetParent === null) continue;
-      const r = node.getBoundingClientRect();
-      if (r.left < minLeft - 30 || r.left > maxRight) continue;
-      const text = node.innerText || '';
-      if (/submotivo\s*:/i.test(text)) {
-        combinedChatText += '\n' + text;
+
+    // Solo inspeccionamos el DOM si estamos analizando el ticket actualmente visible en pantalla
+    const currentOpenTkt = getCurrentLaraigoTicketNumber();
+    if (!explicitTicketNum || explicitTicketNum === currentOpenTkt) {
+      const { minLeft, maxRight } = getChatColumnBounds();
+      const candidateNodes = document.querySelectorAll(
+        '[class*="message"], [class*="bubble"], [class*="chat"], p, div, span'
+      );
+
+      for (const node of candidateNodes) {
+        if (isElementInOurOverlay(node)) continue;
+        if (node.offsetParent === null) continue;
+        const r = node.getBoundingClientRect();
+        if (r.left < minLeft - 30 || r.left > maxRight) continue;
+        const text = node.innerText || '';
+        if (/submotivo\s*:/i.test(text)) {
+          combinedChatText += '\n' + text;
+        }
       }
     }
 
     if (combinedChatText) {
-      return extractSubmotivoFromText(combinedChatText);
+      return extractSubmotivoFromText(combinedChatText, explicitTicketNum);
     }
 
     return null;
@@ -1484,6 +1602,54 @@
     });
   }
 
+  function doesInteractionsListHaveGreeting(interactions) {
+    if (!Array.isArray(interactions)) return false;
+    for (const item of interactions) {
+      const iText = normalizeText(item?.interactiontext || '');
+      if (iText.includes("hola tecnico, procederemos con la atencion")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function doesInteractionsListHaveSecondQuestion(interactions) {
+    if (!Array.isArray(interactions)) return false;
+    const secondStepPhrases = [
+      "enviar error de toa",
+      "enviar captura de reenvio desde su toa",
+      "enviar captura de imagen de fat/tap y cintillos",
+      "enviar captura de imagen de fat/tap",
+      "enviar cintillos",
+      "enviar imagen del repetidor",
+      "enviar motivo de sot de manto",
+      "enviar evidencias porfavor",
+      "enviar repetidor a activar",
+      "cual es el motivo de la sot de manto",
+      "enviar evidencias y motivo de la derivacion"
+    ];
+
+    let hasGreeting = false;
+    let hasShortClosingReply = false;
+
+    for (const item of interactions) {
+      if (!item || item.interactiontype === 'LOG') continue;
+      const text = normalizeText(item.interactiontext || '');
+      if (secondStepPhrases.some(phrase => text.includes(phrase))) {
+        return true;
+      }
+      if (text.includes("hola tecnico, procederemos con la atencion")) {
+        hasGreeting = true;
+      }
+      const textNoTime = text.replace(/\b\d{1,2}:\d{2}\b/g, '').trim();
+      if (textNoTime === "un momento" || textNoTime === "se revisa") {
+        hasShortClosingReply = true;
+      }
+    }
+
+    return hasGreeting && hasShortClosingReply;
+  }
+
   function doesCurrentChatAlreadyHaveGreeting() {
     const currentTkt = getCurrentLaraigoTicketNumber();
     if (currentTkt && apiGreetedTickets.has(currentTkt)) {
@@ -1493,11 +1659,8 @@
     const meta = getActiveTicketMeta(currentTkt);
     if (meta && meta.conversationid && apiInteractionsByConvId.has(Number(meta.conversationid))) {
       const interactions = apiInteractionsByConvId.get(Number(meta.conversationid)) || [];
-      for (const item of interactions) {
-        const iText = normalizeText(item.interactiontext || '');
-        if (iText.includes("hola tecnico, procederemos con la atencion")) {
-          return true;
-        }
+      if (doesInteractionsListHaveGreeting(interactions)) {
+        return true;
       }
     }
 
@@ -1512,6 +1675,15 @@
   }
 
   function doesCurrentChatAlreadyHaveSecondQuestion() {
+    const currentTkt = getCurrentLaraigoTicketNumber();
+    const meta = getActiveTicketMeta(currentTkt);
+    if (meta && meta.conversationid && apiInteractionsByConvId.has(Number(meta.conversationid))) {
+      const interactions = apiInteractionsByConvId.get(Number(meta.conversationid)) || [];
+      if (doesInteractionsListHaveSecondQuestion(interactions)) {
+        return true;
+      }
+    }
+
     const bubbles = getCentralChatBubbleNodes();
 
     const secondStepPhrases = [
@@ -1679,34 +1851,112 @@
     return [];
   }
 
-  async function clickAndOpenTicketCard(ticketEl) {
-    if (!ticketEl) return;
+  // ==============================================================
+  // ATENCIÓN 100% EN 2° PLANO POR API (SIN CAMBIAR DE CHAT NI SCROLLEAR)
+  // Permite seguir trabajando en el mismo ticket sin interrupciones
+  // ==============================================================
+  async function processTicketInBackgroundViaApi(ticketMeta) {
+    if (!ticketMeta || !ticketMeta.conversationid || !ticketMeta.ticketnum || isDisabledInThisTab) return false;
 
-    ticketEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    await sleep(100);
+    const tNum = String(ticketMeta.ticketnum).trim();
+    const convId = Number(ticketMeta.conversationid);
+    if (!tNum || !convId) return false;
 
-    const rect = ticketEl.getBoundingClientRect();
-    const centerX = rect.left + rect.width * 0.45;
-    const centerY = rect.top + rect.height * 0.5;
+    if (backgroundTicketsInProgress.has(tNum)) return false;
+    if (wasTicketAlreadyAnsweredInStorage(null, tNum, null).answered) return false;
 
-    const hitEl = document.elementFromPoint(centerX, centerY);
-    if (hitEl && !isElementInOurOverlay(hitEl)) {
-      simulateRealClick(hitEl);
-    }
+    backgroundTicketsInProgress.add(tNum);
+    const badge = document.getElementById('lc-scanner-status');
 
-    simulateRealClick(ticketEl);
+    try {
+      notifyNewTicketOnce(tNum, ticketMeta.displayname || '');
 
-    await sleep(550);
-    if (!isAnyTicketCurrentlyOpenInCenter()) {
-      const innerClickable = ticketEl.querySelector('span, b, strong, p, a, div');
-      if (innerClickable) {
-        simulateRealClick(innerClickable);
+      // 1. Consultar historial e información del ticket en 2° plano vía API (/api/multi)
+      const initFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid);
+
+      if (doesInteractionsListHaveSecondQuestion(initFetch.interactions)) {
+        const dInit = scanScreenForSubmotivo('', tNum);
+        markTicketAsAnswered(dInit?.sot || null, tNum, dInit?.signature || null);
+        return true;
       }
-      const leftHitEl = document.elementFromPoint(rect.left + Math.min(75, rect.width * 0.35), rect.top + Math.min(25, rect.height * 0.4));
-      if (leftHitEl && !isElementInOurOverlay(leftHitEl)) {
-        simulateRealClick(leftHitEl);
+
+      const dPre = scanScreenForSubmotivo('', tNum);
+      if (dPre && wasTicketAlreadyAnsweredInStorage(dPre.sot, tNum, dPre.signature).answered) {
+        return true;
       }
-      await sleep(500);
+      if (dPre && skippedTickets.has(dPre.signature)) {
+        return false;
+      }
+
+      // PASO 1 (0s): Enviar saludo inmediato por API sin cambiar de ticket ni tocar el chat abierto
+      const alreadyGreeted =
+        apiGreetedTickets.has(tNum) ||
+        Boolean(ticketMeta.lastreplyuser) ||
+        doesInteractionsListHaveGreeting(initFetch.interactions);
+
+      if (!alreadyGreeted) {
+        if (badge) {
+          badge.innerText = `⚡ [2° Plano] Ticket #${tNum}: Enviando 1° Saludo (0s)...`;
+        }
+        const sent1 = await sendMessageViaLaraigoApi(BASE_GREETING, ticketMeta, true);
+        if (sent1) {
+          apiGreetedTickets.add(tNum);
+          showToast(`⚡ Ticket #${tNum}: 1° Saludo enviado en 2° plano (esperando 5s...)`, "info");
+        } else {
+          return false;
+        }
+      }
+
+      // PASO 2 (5s): Esperar 5 segundos en segundo plano sin mover el scroll ni cambiar de conversación
+      if (badge) {
+        badge.innerText = `⏳ [2° Plano] Ticket #${tNum}: Esperando 5s por fotos/cintillos...`;
+      }
+      await sleep(SECOND_MESSAGE_DELAY_MS);
+
+      if (isDisabledInThisTab || !isScanningQueue) return false;
+
+      // PASO 3: Re-consultar mensajes/adjuntos del ticket vía API tras los 5 segundos
+      const secondFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid);
+      if (doesInteractionsListHaveSecondQuestion(secondFetch.interactions)) {
+        const dDone = scanScreenForSubmotivo('', tNum);
+        markTicketAsAnswered(dDone?.sot || null, tNum, dDone?.signature || null);
+        return true;
+      }
+
+      const detected = scanScreenForSubmotivo('', tNum) || dPre;
+      if (!detected || !detected.rule || detected.casuistica) {
+        if (badge) {
+          badge.innerText = `⚠️ Ticket #${tNum}: Casuística o sin Submotivo (${detected?.rawSubmotivo || 'revisar'})`;
+        }
+        return false;
+      }
+
+      if (wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature).answered) {
+        return true;
+      }
+
+      // Analizar fotos (TOA vs equipo), videos, cintillos y texto directamente desde la API en memoria
+      const finalStats = await analyzeFullTicketContext(detected, '', tNum);
+      const secondMessageText = resolveSecondMessage(detected.rule, finalStats);
+      if (!secondMessageText) return false;
+
+      if (badge) {
+        badge.innerText = `🚀 [2° Plano] Ticket #${tNum}: Enviando 2° "${secondMessageText}"...`;
+      }
+
+      const sent2 = await sendMessageViaLaraigoApi(secondMessageText, ticketMeta, false);
+      if (sent2) {
+        markTicketAsAnswered(detected.sot, tNum, detected.signature);
+        if (badge) {
+          badge.innerText = `✅ Ticket #${tNum} (${detected.rule.name}): "${secondMessageText}" enviado sin cambiar de chat`;
+        }
+        showToast(`✅ Ticket #${tNum}: "${secondMessageText}" enviado en 2° plano`, "success");
+        return true;
+      }
+
+      return false;
+    } finally {
+      backgroundTicketsInProgress.delete(tNum);
     }
   }
 
@@ -1715,21 +1965,17 @@
 
     let arrivalDebounce = null;
     inboxArrivalObserver = new MutationObserver(() => {
-      if (!isScanningQueue || isPausedForQuestion || isSendingLock || isStepInProgress || isDisabledInThisTab) return;
+      if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) return;
 
-      if (!isAnyTicketCurrentlyOpenInCenter()) {
-        const asigInfo = getAsignadosColumnInfo();
-        const tickets = getInboxTicketElements();
-        if ((asigInfo && asigInfo.assignedCount > 0) || tickets.length > 0) {
-          clearTimeout(arrivalDebounce);
-          arrivalDebounce = setTimeout(() => {
-            if (isScanningQueue && !isSendingLock && !isStepInProgress) {
-              clearTimeout(scannerLoopTimeout);
-              currentTicketIndex = 0;
-              runNextScannerStep();
-            }
-          }, 250);
-        }
+      const asigInfo = getAsignadosColumnInfo();
+      if (asigInfo && asigInfo.assignedCount > 0) {
+        clearTimeout(arrivalDebounce);
+        arrivalDebounce = setTimeout(() => {
+          if (isScanningQueue && !isStepInProgress && !isDisabledInThisTab) {
+            clearTimeout(scannerLoopTimeout);
+            runNextScannerStep();
+          }
+        }, 300);
       }
     });
 
@@ -1737,7 +1983,7 @@
   }
 
   // ==========================================
-  // MOTOR DE AUTO-ESCANEO Y SCROLL DE CHATS
+  // MOTOR DE AUTO-ATENCIÓN EN 2° PLANO (SIN SCROLL NI CAMBIO DE CHAT)
   // ==========================================
   function stopScannerIfRunning() {
     if (isScanningQueue) {
@@ -1750,10 +1996,10 @@
       const badge = document.getElementById('lc-scanner-status');
       if (btn) {
         btn.classList.remove('active');
-        btn.innerText = "▶️ Auto-Escanear y Scrollear Chats";
+        btn.innerText = "▶️ Auto-Atender en 2° Plano (Sin cambiar de chat)";
       }
       if (badge) {
-        badge.innerText = "Escáner en pausa";
+        badge.innerText = "Auto-atención en pausa";
       }
     }
   }
@@ -1767,164 +2013,80 @@
     const badge = document.getElementById('lc-scanner-status');
 
     if (isScanningQueue) {
-      btn.classList.add('active');
-      btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "Vigilando Asignados: abre el ticket apenas caiga...";
-      showToast("🔍 Auto-Escaneo activo (Abre tickets solos)", "info");
-      currentTicketIndex = 0;
+      if (btn) {
+        btn.classList.add('active');
+        btn.innerText = "⏹️ Pausar Auto-Atención en 2° Plano";
+      }
+      if (badge) {
+        badge.innerText = "Activo en 2° plano: responde sin cambiar de ticket ni scrollear...";
+      }
+      showToast("🚀 Auto-Atención en 2° plano activa (sin cambiar de chat)", "info");
       startInstantInboxArrivalWatcher();
       runNextScannerStep();
     } else {
       stopScannerIfRunning();
-      showToast("⏸️ Escaneo detenido", "warning");
+      showToast("⏸️ Auto-Atención en pausa", "warning");
     }
   }
 
   async function runNextScannerStep() {
-    if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab || isSendingLock || isStepInProgress) return;
+    if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab || isStepInProgress) return;
 
     isStepInProgress = true;
     const badge = document.getElementById('lc-scanner-status');
-    const asigInfo = getAsignadosColumnInfo();
-    const tickets = getInboxTicketElements();
 
-    // Caso 1: Hay tarjetas de tickets en la columna izquierda ("Asignados")
-    if (tickets.length > 0) {
-      if (currentTicketIndex >= tickets.length) {
-        currentTicketIndex = 0;
+    try {
+      // 1. Consultar la lista actualizada de tickets en "Asignados" vía API en 2° plano (sin hacer clic en la UI)
+      await pollAssignedTicketsViaBridge();
+
+      // 2. Lanzar atención en 2° plano para todos los tickets ASIGNADO pendientes
+      const pendingAssigned = [];
+      for (const t of apiTicketsByTicketNum.values()) {
+        if (!t || !t.ticketnum || t.status !== 'ASIGNADO') continue;
+        const tNum = String(t.ticketnum).trim();
+        if (wasTicketAlreadyAnsweredInStorage(null, tNum, null).answered) continue;
+        if (backgroundTicketsInProgress.has(tNum)) continue;
+        pendingAssigned.push(t);
       }
 
-      const ticketEl = tickets[currentTicketIndex];
-      if (badge) {
-        badge.innerText = `🖱️ Abriendo ticket ${currentTicketIndex + 1} de ${tickets.length} en Asignados...`;
+      if (pendingAssigned.length > 0) {
+        for (const ticketMeta of pendingAssigned) {
+          processTicketInBackgroundViaApi(ticketMeta);
+        }
+      } else if (isAnyTicketCurrentlyOpenInCenter() && !isSendingLock) {
+        // Si el ticket actualmente abierto aún no fue atendido y no está en proceso en 2° plano
+        const openTkt = getCurrentLaraigoTicketNumber();
+        const openMeta = getActiveTicketMeta(openTkt);
+        if (openMeta && openMeta.conversationid && openMeta.ticketnum) {
+          const openNum = String(openMeta.ticketnum).trim();
+          if (!wasTicketAlreadyAnsweredInStorage(null, openNum, null).answered && !backgroundTicketsInProgress.has(openNum)) {
+            processTicketInBackgroundViaApi(openMeta);
+          }
+        }
+      } else if (badge && backgroundTicketsInProgress.size === 0) {
+        badge.innerText = `👀 Vigilando Asignados en 2° plano (sin cambiar tu chat actual)...`;
       }
-
-      await clickAndOpenTicketCard(ticketEl);
-      await waitForTicketContentToLoad(3200);
-
-      if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) {
-        isStepInProgress = false;
-        return;
-      }
-
-      await processCurrentOpenTicket(() => {
-        currentTicketIndex++;
-        isStepInProgress = false;
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 1800);
-      });
-      return;
-    }
-
-    // Caso 2: "Asignados(N)" dice que hay >= 1 ticket pero aún no se detectó la fila
-    if (asigInfo && asigInfo.assignedCount > 0) {
-      if (badge) {
-        badge.innerText = `🔔 Asignados(${asigInfo.assignedCount}) detectado. Abriendo primer ticket...`;
-      }
-      simulateRealClick(asigInfo.asignadosEl);
-      await sleep(350);
-
-      const firstRowX = asigInfo.colLeft + (asigInfo.colRight - asigInfo.colLeft) * 0.45;
-      const firstRowY = asigInfo.tabBarBottom + 38;
-      const targetAtFirstRow = document.elementFromPoint(firstRowX, firstRowY);
-      if (targetAtFirstRow && !isElementInOurOverlay(targetAtFirstRow)) {
-        simulateRealClick(targetAtFirstRow);
-        await waitForTicketContentToLoad(3200);
-      }
-
-      if (isAnyTicketCurrentlyOpenInCenter()) {
-        await processCurrentOpenTicket(() => {
-          isStepInProgress = false;
-          scannerLoopTimeout = setTimeout(runNextScannerStep, 1800);
-        });
-        return;
-      }
-    }
-
-    // Caso 3: Si ya hay un chat abierto en el centro
-    if (isAnyTicketCurrentlyOpenInCenter()) {
-      await processCurrentOpenTicket(() => {
-        isStepInProgress = false;
+    } finally {
+      isStepInProgress = false;
+      if (isScanningQueue && !isDisabledInThisTab) {
         scannerLoopTimeout = setTimeout(runNextScannerStep, 2200);
-      });
-      return;
+      }
     }
-
-    // Caso 4: Bandeja totalmente vacía ("Asignados(0)")
-    if (badge) {
-      badge.innerText = `👀 Bandeja vacía (Asignados: 0). Esperando nuevo ticket para abrirlo...`;
-    }
-    isStepInProgress = false;
-    scannerLoopTimeout = setTimeout(runNextScannerStep, 1500);
   }
 
   async function processCurrentOpenTicket(onDone) {
     if (isDisabledInThisTab) {
-      onDone();
+      if (onDone) onDone();
       return;
     }
-    const badge = document.getElementById('lc-scanner-status');
-
-    if (isConversationBlockedByHSM()) {
-      if (badge) badge.innerText = `⛔ Conversación bloqueada por HSM. Saltando...`;
-      onDone();
+    const openTkt = getCurrentLaraigoTicketNumber();
+    const openMeta = getActiveTicketMeta(openTkt);
+    if (openMeta && openMeta.conversationid) {
+      await processTicketInBackgroundViaApi(openMeta);
+      if (onDone) onDone();
       return;
     }
-
-    if (doesCurrentChatAlreadyHaveSecondQuestion()) {
-      const d = scanScreenForSubmotivo();
-      if (d) markTicketAsAnswered(d.sot, d.ticketNum, d.signature);
-      if (badge) badge.innerText = `✅ Ya respondido completo en chat. Saltando...`;
-      onDone();
-      return;
-    }
-
-    let detected = scanScreenForSubmotivo();
-    if (!detected) {
-      const scrollData = await scrollChatAndCollectFullData();
-      detected = scrollData.detected;
-    }
-
-    if (!detected) {
-      if (badge) badge.innerText = `🔍 Sin plantilla de técnico en este chat. Saltando...`;
-      onDone();
-      return;
-    }
-
-    const storageCheck = wasTicketAlreadyAnsweredInStorage(detected.sot, detected.ticketNum, detected.signature);
-    if (storageCheck.answered) {
-      if (badge) badge.innerText = `🛡️ Anti-duplicado: ${storageCheck.reason} Saltando...`;
-      onDone();
-      return;
-    }
-
-    if (detected.ticketNum || detected.sot) {
-      notifyNewTicketOnce(detected.ticketNum || detected.sot, detected.techName || '');
-    }
-
-    if (skippedTickets.has(detected.signature)) {
-      if (badge) badge.innerText = `⏭️ Ticket omitido previamente. Saltando...`;
-      onDone();
-      return;
-    }
-
-    if (detected.casuistica || !detected.rule) {
-      if (badge) badge.innerText = `⚠️ Pausado: Casuística requiere tu decisión`;
-      showToast("⚠️ Casuística detectada: revisa el panel", "warning");
-
-      askAgentConfirmation(
-        `❓ CASUÍSTICA DETECTADA:\n${detected.casuistica || 'No se pudo determinar la plantilla.'}\n\nElige una plantilla manualmente abajo o presiona "Omitir / Cancelar" para saltar al siguiente ticket.`,
-        detected.rule ? () => {
-          safeSendTwoStepSmartReply(detected.rule, detected, true, () => onDone());
-        } : null,
-        () => {
-          skippedTickets.add(detected.signature);
-          onDone();
-        }
-      );
-      return;
-    }
-
-    safeSendTwoStepSmartReply(detected.rule, detected, true, () => onDone());
+    if (onDone) onDone();
   }
 
   function updateDetectedPreview(detected, contextStats = null) {
@@ -2004,7 +2166,7 @@
 
     let debounceTimer = null;
     manualObserver = new MutationObserver(() => {
-      if (isScanningQueue || isSendingLock || isDisabledInThisTab) return;
+      if (isSendingLock || isDisabledInThisTab) return;
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
         if (isDisabledInThisTab || isSendingLock) return;
@@ -2151,13 +2313,13 @@
           </div>
         </div>
 
-        <!-- Control de Auto-Escaneo y Scroll de Bandeja -->
+        <!-- Control de Auto-Atención en 2° Plano (Sin Scroll ni Cambio de Chat) -->
         <div class="lc-scanner-panel">
           <button id="lc-btn-scanner" class="lc-btn-scanner">
-            ▶️ Auto-Escanear y Scrollear Chats
+            ▶️ Auto-Atender en 2° Plano (Sin cambiar de chat)
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            Abre el ticket apenas cae ➔ Saludo (0s) ➔ (5s) ➔ 2° Respuesta
+            Responde por API en 2° plano ➔ Saludo (0s) ➔ (5s) ➔ 2° Respuesta (Sin scroll)
           </div>
         </div>
 
