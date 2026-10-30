@@ -1,5 +1,6 @@
-// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro (Versión Auditada)
+// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro (Versión Auditada v1.3)
 // Flujo de Tiempo Exacto:
+//   0° AUTO-APERTURA DE TICKET: Detecta al instante cuando cae un ticket en "Asignados(1..N)" y le da clic real para abrirlo sin intervención humana
 //   1° INMEDIATO (0s): Envía el saludo "Hola Técnico, Procederemos con la atención"
 //   2° ESPERA DE 5 SEGUNDOS: Da 5s para que terminen de caer fotos, cintillos o textos del técnico
 //   3° EVALUACIÓN PROFUNDA DEL CHAT + AUTO-SCROLL: Analiza Submotivo + Evidencias reales del chat central y envía el 2° mensaje
@@ -10,7 +11,6 @@
   const BASE_GREETING = "Hola Técnico, Procederemos con la atención";
   const SECOND_MESSAGE_DELAY_MS = 5000; // 5 segundos de espera antes del 2° mensaje
 
-  // Orden estratégico: los más específicos primero (ej. "mesh" antes de "activaciones" por si dice "Activación de Mesh")
   const SUBMOTIVO_MAP = [
     {
       id: "reenvio",
@@ -67,6 +67,7 @@
   // ==============================================================
   let isDisabledInThisTab = sessionStorage.getItem('laraigo_copilot_tab_disabled') === 'true';
   let manualObserver = null;
+  let inboxArrivalObserver = null;
 
   // ==============================================================
   // FILTRO ANTI-DUPLICADOS SINCRONIZADO ENTRE PESTAÑAS
@@ -74,6 +75,7 @@
   let answeredRegistry = {};
   let skippedTickets = new Set();
   let isSendingLock = false;
+  let isStepInProgress = false;
 
   chrome.storage.local.get(["laraigo_answered_registry"], (res) => {
     if (res.laraigo_answered_registry) {
@@ -124,35 +126,99 @@
   const imageClassificationCache = new Map();
 
   // ==============================================================
-  // DELIMITADOR GEOMÉTRICO DEL ÁREA CENTRAL DEL CHAT EN LARAIGO
-  // Evita confundir el chat con la columna izquierda (Asignados) o derecha (Información CRM)
+  // DELIMITADOR GEOMÉTRICO DEL PANEL IZQUIERDO ("Asignados") Y CHAT CENTRAL
   // ==============================================================
-  function getChatColumnBounds() {
-    let minLeft = 120;
-    let maxRight = window.innerWidth;
+  function isElementInOurOverlay(el) {
+    if (!el) return false;
+    const widget = document.getElementById('laraigo-copilot-container');
+    const pill = document.getElementById('laraigo-disabled-pill');
+    const toast = document.getElementById('lc-toast');
+    if (widget && widget.contains(el)) return true;
+    if (pill && pill.contains(el)) return true;
+    if (toast && toast.contains(el)) return true;
+    return false;
+  }
 
-    // 1. Límite izquierdo: borde derecho de la pestaña "Asignados(X)" / "Cerrados"
-    const allEls = Array.from(document.querySelectorAll('div, span, a, button'));
+  // Encuentra la pestaña "Asignados(N)" y devuelve su elemento, el conteo N y las coordenadas de la columna izquierda
+  function getAsignadosColumnInfo() {
+    const allEls = Array.from(document.querySelectorAll('div, span, a, button, li'));
+    let asignadosEl = null;
+    let assignedCount = 0;
+
     for (const el of allEls) {
+      if (isElementInOurOverlay(el)) continue;
+      if (el.offsetParent === null) continue;
       const txt = (el.innerText || '').trim();
-      if (/^Asignados\s*\(\d+\)$/i.test(txt)) {
-        // Buscar el contenedor de la lista izquierda
-        let col = el.parentElement;
-        for (let i = 0; i < 5; i++) {
-          if (!col || col === document.body) break;
-          const r = col.getBoundingClientRect();
-          if (r.width >= 140 && r.width <= 380 && r.height > 200) {
-            minLeft = Math.max(minLeft, r.right - 10);
-            break;
-          }
-          col = col.parentElement;
-        }
+      const match = txt.match(/^Asignados\s*\((\d+)\)$/i);
+      if (match) {
+        asignadosEl = el;
+        assignedCount = parseInt(match[1], 10);
         break;
       }
     }
 
-    // 2. Límite derecho: borde izquierdo del panel "Información" / "Variables" / botón "Vincular"
+    if (!asignadosEl) {
+      return null;
+    }
+
+    const tabRect = asignadosEl.getBoundingClientRect();
+
+    // Buscar la barra contenedora de las pestañas (Asignados | Pausados | Cerrados) para saber el ancho exacto de la columna izquierda
+    let tabBar = asignadosEl.parentElement;
+    let colLeft = Math.max(30, tabRect.left - 15);
+    let colRight = Math.max(tabRect.right + 140, 240);
+    let tabBarBottom = tabRect.bottom;
+
+    for (let i = 0; i < 6; i++) {
+      if (!tabBar || tabBar === document.body) break;
+      const r = tabBar.getBoundingClientRect();
+      const t = (tabBar.innerText || '');
+      if (t.includes('Pausados') && r.width >= 140 && r.width <= 450) {
+        colLeft = r.left;
+        colRight = r.right;
+        if (r.height < 80) {
+          tabBarBottom = r.bottom;
+        }
+        break;
+      }
+      tabBar = tabBar.parentElement;
+    }
+
+    // Buscar el contenedor vertical completo de la columna izquierda
+    let leftColumnContainer = asignadosEl.parentElement;
+    for (let i = 0; i < 7; i++) {
+      if (!leftColumnContainer || leftColumnContainer === document.body) break;
+      const r = leftColumnContainer.getBoundingClientRect();
+      if (r.height > 260 && r.width >= 140 && r.width <= 460) {
+        colLeft = r.left;
+        colRight = r.right;
+        break;
+      }
+      leftColumnContainer = leftColumnContainer.parentElement;
+    }
+
+    return {
+      asignadosEl,
+      assignedCount,
+      colLeft,
+      colRight,
+      tabBarBottom,
+      leftColumnContainer: leftColumnContainer || document.body
+    };
+  }
+
+  function getChatColumnBounds() {
+    let minLeft = 140;
+    let maxRight = window.innerWidth;
+
+    const asigInfo = getAsignadosColumnInfo();
+    if (asigInfo) {
+      minLeft = Math.max(120, asigInfo.colRight - 5);
+    }
+
+    const allEls = Array.from(document.querySelectorAll('div, span, a, button'));
     for (const el of allEls) {
+      if (isElementInOurOverlay(el)) continue;
       const txt = (el.innerText || '').trim();
       if (txt === 'Vincular' || txt === 'Información' || txt === 'Variables') {
         const r = el.getBoundingClientRect();
@@ -172,17 +238,6 @@
     }
 
     return { minLeft, maxRight };
-  }
-
-  function isElementInOurOverlay(el) {
-    if (!el) return false;
-    const widget = document.getElementById('laraigo-copilot-container');
-    const pill = document.getElementById('laraigo-disabled-pill');
-    const toast = document.getElementById('lc-toast');
-    if (widget && widget.contains(el)) return true;
-    if (pill && pill.contains(el)) return true;
-    if (toast && toast.contains(el)) return true;
-    return false;
   }
 
   function findChatMessagesScrollContainer() {
@@ -225,7 +280,6 @@
     return bestCandidate;
   }
 
-  // Hace scroll arriba -> medio -> abajo en el chat abierto para cargar todo el historial e imágenes
   async function scrollChatAndCollectFullData() {
     const scrollContainer = findChatMessagesScrollContainer();
     let collectedText = '';
@@ -263,9 +317,7 @@
       if (isElementInOurOverlay(img)) return false;
       if (img.offsetParent === null) return false;
       const rect = img.getBoundingClientRect();
-      // Debe estar dentro de la columna central del chat (no en la columna derecha de perfil ni izquierda)
       if (rect.left < minLeft - 20 || rect.left > maxRight - 30) return false;
-      // Excluir íconos y avatares (< 95px)
       if (rect.width < 95 || rect.height < 95) return false;
       const src = (img.src || '').toLowerCase();
       if (!src || src.includes('avatar') || src.includes('emoji') || src.includes('logo') || src.includes('profile')) return false;
@@ -273,7 +325,6 @@
     });
   }
 
-  // Esperar hasta 1.5s si alguna imagen del chat todavía está descargándose
   async function waitForChatImagesToLoad(imgs, maxWaitMs = 1500) {
     const pending = imgs.filter(img => !img.complete || img.naturalWidth === 0);
     if (pending.length === 0) return;
@@ -414,7 +465,6 @@
     });
   }
 
-  // Obtiene únicamente el texto dentro de la columna central del chat (nunca del panel derecho ni izquierdo)
   function getCentralChatOnlyText(extraCollectedText = '') {
     const scrollContainer = findChatMessagesScrollContainer();
     if (scrollContainer) {
@@ -430,7 +480,6 @@
       if (node.offsetParent === null) continue;
       if (node.children.length > 4) continue;
       const r = node.getBoundingClientRect();
-      // Solo burbujas en el centro (debajo de cabecera Ticket y encima de barra de escribir)
       if (r.left >= minLeft && r.right <= maxRight && r.top > 95 && r.bottom < window.innerHeight - 40) {
         const t = (node.innerText || '').trim();
         if (t) chatText += '\n' + t;
@@ -443,7 +492,6 @@
   function analyzeTechnicianExtraText(detected, extraCollectedText = '') {
     const rawChatText = getCentralChatOnlyText(extraCollectedText);
 
-    // Limpiar el texto de bloques del sistema, plantilla inicial y mensajes del asesor
     let cleaned = rawChatText
       .replace(/Hola,\s*soy\s*el\s*t[eé]cnico[\s\S]*?Submotivo\s*:\s*[^\r\n]+/gi, ' ')
       .replace(/Te estamos contactando con un asesor especializado[^\r\n]*/gi, ' ')
@@ -468,12 +516,10 @@
     const sotStr = detected?.sot ? String(detected.sot) : '';
     const ticketStr = detected?.ticketNum ? String(detected.ticketNum) : '';
 
-    // 1. Detectar números de cintillos (ej. 6273351, 8041438, 6776329...)
     const numberMatches = cleaned.match(/\b\d{6,9}\b/g) || [];
     const uniqueCintillos = new Set(
       numberMatches.filter(num => {
         if (num === sotStr || num === ticketStr) return false;
-        // Excluir teléfonos de 9 dígitos que empiezan con 9
         if (num.length === 9 && num.startsWith('9')) return false;
         return true;
       })
@@ -481,7 +527,6 @@
 
     const hasCintillosNumbers = uniqueCintillos.size >= 1;
 
-    // 2. Detectar si el técnico escribió texto explicativo (para SOT de manto)
     const textWithoutNumbers = cleaned
       .replace(/\b\d+\b/g, ' ')
       .replace(/\b(hola|buenas|tardes|dias|noches|buen|dia|por|favor|apoyo|gracias|estimado|asesor|con|la|el|de|en|su|para|activacion|consulta|cintillos|reenvio|mesh|manto|pext|text)\b/gi, ' ')
@@ -538,22 +583,13 @@
 
     switch (rule.id) {
       case "activaciones":
-        if (stats.hasAppScreenshot) {
-          return "un momento";
-        }
-        return "enviar error de toa";
+        return stats.hasAppScreenshot ? "un momento" : "enviar error de toa";
 
       case "reenvio":
-        if (stats.hasAppScreenshot) {
-          return "un momento";
-        }
-        return "enviar captura de reenvio desde su toa";
+        return stats.hasAppScreenshot ? "un momento" : "enviar captura de reenvio desde su toa";
 
       case "mesh":
-        if (stats.hasAnyImage) {
-          return "Un momento";
-        }
-        return "Enviar imagen del repetidor";
+        return stats.hasAnyImage ? "Un momento" : "Enviar imagen del repetidor";
 
       case "cintillos":
         if (stats.hasCintillosNumbers && !stats.hasAnyImage) {
@@ -639,6 +675,14 @@
   function isConversationBlockedByHSM() {
     const bodyText = normalizeText(document.body.innerText || '');
     return bodyText.includes("esta conversacion se encuentra bloqueada hasta que el cliente responda");
+  }
+
+  // Verifica si actualmente hay algún ticket abierto en el panel central
+  function isAnyTicketCurrentlyOpenInCenter() {
+    if (getCurrentLaraigoTicketNumber()) return true;
+    if (findChatInput()) return true;
+    if (isConversationBlockedByHSM()) return true;
+    return false;
   }
 
   function findChatInput() {
@@ -762,11 +806,29 @@
     return (target.element.innerText || '').trim();
   }
 
+  // Simular secuencia completa de eventos de puntero y ratón (para Angular/React)
   function simulateRealClick(el) {
     if (!el) return;
-    const opts = { bubbles: true, cancelable: true, view: window };
-    el.dispatchEvent(new MouseEvent('mousedown', opts));
-    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    const rect = el.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX,
+      clientY,
+      button: 0,
+      buttons: 1
+    };
+
+    try {
+      el.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+      el.dispatchEvent(new MouseEvent('mousedown', eventInit));
+      el.dispatchEvent(new PointerEvent('pointerup', eventInit));
+      el.dispatchEvent(new MouseEvent('mouseup', eventInit));
+    } catch (e) {}
     el.click();
   }
 
@@ -874,13 +936,12 @@
       }
     }
 
-    // Activar candado durante todo el proceso (Saludo + 5 segundos de espera + 2° Mensaje)
     isSendingLock = true;
     const badge = document.getElementById('lc-scanner-status');
 
     const greetingAlreadyPresent = doesCurrentChatAlreadyHaveGreeting();
 
-    // PASO 1: Enviar el saludo DE INMEDIATO (si no estaba ya en pantalla)
+    // PASO 1: Enviar el saludo DE INMEDIATO (0s)
     if (!greetingAlreadyPresent || force) {
       showToast(`⚡ 1/2 Enviando saludo inmediato...`, "info");
       if (badge) badge.innerText = `⚡ Enviando saludo inmediato...`;
@@ -898,7 +959,7 @@
       showToast(`✅ Saludo ya en chat. Esperando 5s para evaluar 2° mensaje...`, "info");
     }
 
-    // PASO 2: Esperar 5 segundos (con cuenta regresiva visual) para que terminen de llegar fotos/cintillos/textos
+    // PASO 2: Esperar 5 segundos (con cuenta regresiva visual)
     const totalSeconds = Math.round(SECOND_MESSAGE_DELAY_MS / 1000);
     for (let remaining = totalSeconds; remaining >= 1; remaining--) {
       if (isDisabledInThisTab) {
@@ -911,7 +972,6 @@
       }
       showToast(`⏳ Esperando mensajes del técnico (${remaining}s)...`, "info");
 
-      // En el último segundo de espera, hacer scroll arriba/abajo para capturar todo lo nuevo que llegó
       if (remaining === 1) {
         await scrollChatAndCollectFullData();
       } else {
@@ -919,7 +979,6 @@
       }
     }
 
-    // Verificar que no hayamos cambiado a otro ticket distinto manualmente durante los 5 segundos
     const currentTicketAfterWait = getCurrentLaraigoTicketNumber();
     if (initialTicketNum && currentTicketAfterWait && initialTicketNum !== currentTicketAfterWait) {
       showToast("⚠️ Se cambió de chat durante la espera; cancelando 2° envío", "warning");
@@ -928,7 +987,6 @@
       return false;
     }
 
-    // Evaluar el contexto FRESCO después de los 5 segundos de espera
     const freshDetected = scanScreenForSubmotivo() || initialDetected;
     const freshStats = await analyzeFullTicketContext(freshDetected);
     updateDetectedPreview(freshDetected, freshStats);
@@ -944,7 +1002,6 @@
       return false;
     }
 
-    // PASO 3: Enviar la segunda respuesta y registrar el ticket como completado
     const finalSot = freshDetected?.sot || initialSot;
     const finalTicket = freshDetected?.ticketNum || initialTicketNum;
     const finalSig = freshDetected?.signature || initialSig;
@@ -1090,7 +1147,6 @@
     return candidates.filter(el => {
       if (isElementInOurOverlay(el)) return false;
       if (el.offsetParent === null) return false;
-      // Evitar contenedores gigantes que agrupan toda la página
       if (el.children.length > 5) return false;
       const r = el.getBoundingClientRect();
       return r.left >= minLeft - 20 && r.right <= maxRight + 20 && r.top > 90;
@@ -1136,7 +1192,6 @@
       if (text.includes("hola tecnico, procederemos con la atencion")) {
         hasGreeting = true;
       }
-      // Limpiar hora final ej "un momento 14:33" -> "un momento"
       const textNoTime = text.replace(/\b\d{1,2}:\d{2}\b/g, '').trim();
       if (textNoTime === "un momento" || textNoTime === "se revisa") {
         hasShortClosingReply = true;
@@ -1180,61 +1235,86 @@
   }
 
   // ==============================================================
-  // DETECCIÓN Y SCROLL DE LA COLUMNA "Asignados(X)" DE LARAIGO
+  // DETECCIÓN Y APERTURA AUTOMÁTICA DE TICKETS EN "Asignados(N)"
   // ==============================================================
   function getInboxTicketElements() {
-    const allElements = Array.from(document.querySelectorAll('div, span, a, button, li'));
-    let asignadosTabEl = null;
-    for (const el of allElements) {
-      if (isElementInOurOverlay(el)) continue;
-      const txt = (el.innerText || '').trim();
-      if (/^Asignados\s*\(\d+\)$/i.test(txt)) {
-        asignadosTabEl = el;
-        break;
-      }
-    }
+    const asigInfo = getAsignadosColumnInfo();
 
-    if (asignadosTabEl) {
-      const tabRect = asignadosTabEl.getBoundingClientRect();
-      let leftColumn = asignadosTabEl.parentElement;
-      for (let i = 0; i < 6; i++) {
-        if (!leftColumn || leftColumn === document.body) break;
-        if (leftColumn.clientHeight > 250) break;
-        leftColumn = leftColumn.parentElement;
-      }
+    if (asigInfo) {
+      const { colLeft, colRight, tabBarBottom, leftColumnContainer } = asigInfo;
 
-      if (leftColumn) {
-        const scrollableList = Array.from(leftColumn.querySelectorAll('div')).find(
-          d => d.scrollHeight > d.clientHeight + 20 && d.clientHeight > 150
+      // Buscar todos los elementos visibles dentro de las coordenadas de la lista izquierda debajo de "Asignados(N)"
+      const allLeftEls = Array.from(leftColumnContainer.querySelectorAll('div, li, a, mat-list-item')).filter(el => {
+        if (isElementInOurOverlay(el)) return false;
+        if (el.offsetParent === null) return false;
+        const r = el.getBoundingClientRect();
+
+        // Debe estar debajo de la barra "Asignados" y dentro del ancho de la columna izquierda
+        if (r.top < tabBarBottom - 3) return false;
+        if (r.top > window.innerHeight - 35) return false;
+        if (r.left < colLeft - 12 || r.left > colRight - 40) return false;
+        if (r.right > colRight + 25) return false;
+
+        // Dimensiones de una fila/tarjeta de ticket en la lista izquierda
+        if (r.width < 90) return false;
+        if (r.height < 38 || r.height > 155) return false;
+
+        const text = (el.innerText || '').trim();
+        if (text.length < 2 || text.length > 350) return false;
+
+        return true;
+      });
+
+      if (allLeftEls.length > 0) {
+        // Priorizar elementos que tengan cursor: pointer (los ítems clicables reales de Angular/React)
+        const pointerEls = allLeftEls.filter(el => {
+          try {
+            return window.getComputedStyle(el).cursor === 'pointer';
+          } catch (e) {
+            return false;
+          }
+        });
+
+        const basePool = pointerEls.length > 0 ? pointerEls : allLeftEls;
+
+        // Si un contenedor A envuelve a un contenedor B y tienen casi la misma altura (< 18px de diferencia),
+        // nos quedamos con B (el elemento interno real del ticket, NO el wrapper externo de la lista)
+        const innerCards = basePool.filter(el => {
+          const rA = el.getBoundingClientRect();
+          const hasTightInnerCard = basePool.some(other => {
+            if (other === el || !el.contains(other)) return false;
+            const rB = other.getBoundingClientRect();
+            return Math.abs(rA.height - rB.height) < 18 && rB.width > rA.width * 0.7;
+          });
+          return !hasTightInnerCard;
+        });
+
+        // Agrupar por posición vertical (Y) para obtener 1 tarjeta única por cada fila de ticket (separadas por al menos 36px)
+        const sortedByTop = (innerCards.length > 0 ? innerCards : basePool).sort(
+          (a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top
         );
-        if (scrollableList && currentTicketIndex === 0) {
-          scrollableList.scrollTop = 0;
+
+        const distinctRows = [];
+        for (const item of sortedByTop) {
+          const r = item.getBoundingClientRect();
+          const centerY = r.top + r.height / 2;
+          const alreadyHasRowAtThisY = distinctRows.some(existing => {
+            const er = existing.getBoundingClientRect();
+            const eCenterY = er.top + er.height / 2;
+            return Math.abs(centerY - eCenterY) < 36;
+          });
+          if (!alreadyHasRowAtThisY) {
+            distinctRows.push(item);
+          }
         }
 
-        const candidateCards = Array.from(leftColumn.querySelectorAll('div, li, a')).filter(el => {
-          if (isElementInOurOverlay(el)) return false;
-          if (el.offsetParent === null) return false;
-          const r = el.getBoundingClientRect();
-          if (r.top < tabRect.bottom - 2) return false;
-          if (r.left > 180) return false;
-          if (r.width < 110 || r.width > 340) return false;
-          if (r.height < 48 || r.height > 135) return false;
-
-          const text = (el.innerText || '').trim();
-          if (text.length < 4 || text.length > 260) return false;
-          return true;
-        });
-
-        const uniqueRowCards = candidateCards.filter(card => {
-          return !candidateCards.some(other => other !== card && other.contains(card));
-        });
-
-        if (uniqueRowCards.length > 0) {
-          return uniqueRowCards;
+        if (distinctRows.length > 0) {
+          return distinctRows;
         }
       }
     }
 
+    // Fallback por selectores clásicos
     const candidateSelectors = [
       'div[class*="conversation-item"]',
       'div[class*="chat-item"]',
@@ -1260,6 +1340,70 @@
     return [];
   }
 
+  // Hace clic garantizado sobre la tarjeta del ticket en la columna izquierda para que Laraigo lo abra
+  async function clickAndOpenTicketCard(ticketEl) {
+    if (!ticketEl) return;
+
+    ticketEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    await sleep(100);
+
+    const rect = ticketEl.getBoundingClientRect();
+    const centerX = rect.left + rect.width * 0.45;
+    const centerY = rect.top + rect.height * 0.5;
+
+    // 1. Obtener el elemento exacto bajo el punto central (igual que el clic físico del mouse)
+    const hitEl = document.elementFromPoint(centerX, centerY);
+    if (hitEl && !isElementInOurOverlay(hitEl)) {
+      simulateRealClick(hitEl);
+    }
+
+    // 2. Clic también en el propio contenedor de la fila del ticket
+    simulateRealClick(ticketEl);
+
+    // 3. Esperar 550ms y verificar si ya se abrió el chat en el centro;
+    //    si sigue vacío, probar clic en el texto/nombre interno de la tarjeta
+    await sleep(550);
+    if (!isAnyTicketCurrentlyOpenInCenter()) {
+      const innerClickable = ticketEl.querySelector('span, b, strong, p, a, div');
+      if (innerClickable) {
+        simulateRealClick(innerClickable);
+      }
+      const leftHitEl = document.elementFromPoint(rect.left + Math.min(75, rect.width * 0.35), rect.top + Math.min(25, rect.height * 0.4));
+      if (leftHitEl && !isElementInOurOverlay(leftHitEl)) {
+        simulateRealClick(leftHitEl);
+      }
+      await sleep(500);
+    }
+  }
+
+  // Vigilante instantáneo: cuando la bandeja estaba vacía ("Asignados(0)") y cae un ticket nuevo, dispara la apertura de inmediato
+  function startInstantInboxArrivalWatcher() {
+    if (inboxArrivalObserver) inboxArrivalObserver.disconnect();
+
+    let arrivalDebounce = null;
+    inboxArrivalObserver = new MutationObserver(() => {
+      if (!isScanningQueue || isPausedForQuestion || isSendingLock || isStepInProgress || isDisabledInThisTab) return;
+
+      // Si actualmente no hay chat abierto en el centro y acaba de aparecer un ticket en Asignados(1..N)
+      if (!isAnyTicketCurrentlyOpenInCenter()) {
+        const asigInfo = getAsignadosColumnInfo();
+        const tickets = getInboxTicketElements();
+        if ((asigInfo && asigInfo.assignedCount > 0) || tickets.length > 0) {
+          clearTimeout(arrivalDebounce);
+          arrivalDebounce = setTimeout(() => {
+            if (isScanningQueue && !isSendingLock && !isStepInProgress) {
+              clearTimeout(scannerLoopTimeout);
+              currentTicketIndex = 0;
+              runNextScannerStep();
+            }
+          }, 250);
+        }
+      }
+    });
+
+    inboxArrivalObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
   // ==========================================
   // MOTOR DE AUTO-ESCANEO Y SCROLL DE CHATS
   // ==========================================
@@ -1267,7 +1411,9 @@
     if (isScanningQueue) {
       isScanningQueue = false;
       isPausedForQuestion = false;
+      isStepInProgress = false;
       clearTimeout(scannerLoopTimeout);
+      if (inboxArrivalObserver) inboxArrivalObserver.disconnect();
       const btn = document.getElementById('lc-btn-scanner');
       const badge = document.getElementById('lc-scanner-status');
       if (btn) {
@@ -1284,15 +1430,17 @@
     if (isDisabledInThisTab) return;
     isScanningQueue = !isScanningQueue;
     isPausedForQuestion = false;
+    isStepInProgress = false;
     const btn = document.getElementById('lc-btn-scanner');
     const badge = document.getElementById('lc-scanner-status');
 
     if (isScanningQueue) {
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "1° Saludo inmediato ➔ Espera 5s ➔ 2° Respuesta...";
-      showToast("🔍 Auto-Escaneo iniciado (Saludo inmediato + 5s)", "info");
+      badge.innerText = "Vigilando Asignados: abre el ticket apenas caiga...";
+      showToast("🔍 Auto-Escaneo activo (Abre tickets solos)", "info");
       currentTicketIndex = 0;
+      startInstantInboxArrivalWatcher();
       runNextScannerStep();
     } else {
       stopScannerIfRunning();
@@ -1300,48 +1448,93 @@
     }
   }
 
-  function runNextScannerStep() {
-    if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) return;
+  async function runNextScannerStep() {
+    if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab || isSendingLock || isStepInProgress) return;
 
-    const tickets = getInboxTicketElements();
+    isStepInProgress = true;
     const badge = document.getElementById('lc-scanner-status');
+    const asigInfo = getAsignadosColumnInfo();
+    const tickets = getInboxTicketElements();
 
-    if (tickets.length === 0) {
-      badge.innerText = "Revisando chat abierto actual...";
-      processCurrentOpenTicket(() => {
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 2800);
-      });
-      return;
-    }
+    // Caso 1: Hay tarjetas de tickets en la columna izquierda ("Asignados")
+    if (tickets.length > 0) {
+      if (currentTicketIndex >= tickets.length) {
+        currentTicketIndex = 0;
+      }
 
-    if (currentTicketIndex >= tickets.length) {
-      badge.innerText = `Ciclo completado (${tickets.length} chats). Vigilando nuevos...`;
-      currentTicketIndex = 0;
-      scannerLoopTimeout = setTimeout(runNextScannerStep, 3200);
-      return;
-    }
+      const ticketEl = tickets[currentTicketIndex];
+      if (badge) {
+        badge.innerText = `🖱️ Abriendo ticket ${currentTicketIndex + 1} de ${tickets.length} en Asignados...`;
+      }
 
-    const ticketEl = tickets[currentTicketIndex];
-    badge.innerText = `Abriendo chat ${currentTicketIndex + 1} de ${tickets.length} en Asignados...`;
+      await clickAndOpenTicketCard(ticketEl);
 
-    ticketEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    simulateRealClick(ticketEl);
+      if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) {
+        isStepInProgress = false;
+        return;
+      }
 
-    scannerLoopTimeout = setTimeout(() => {
-      if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) return;
-      processCurrentOpenTicket(() => {
+      await processCurrentOpenTicket(() => {
         currentTicketIndex++;
+        isStepInProgress = false;
         scannerLoopTimeout = setTimeout(runNextScannerStep, 1800);
       });
-    }, 1000);
+      return;
+    }
+
+    // Caso 2: "Asignados(N)" dice que hay >= 1 ticket pero aún no se renderizó la fila o el usuario no está en la pestaña Asignados
+    if (asigInfo && asigInfo.assignedCount > 0) {
+      if (badge) {
+        badge.innerText = `🔔 Asignados(${asigInfo.assignedCount}) detectado. Abriendo primer ticket...`;
+      }
+      // Asegurar que la pestaña "Asignados" esté activa haciéndole clic
+      simulateRealClick(asigInfo.asignadosEl);
+      await sleep(350);
+
+      // Hacer clic por coordenadas en la posición del primer ticket debajo de la pestaña "Asignados"
+      const firstRowX = asigInfo.colLeft + (asigInfo.colRight - asigInfo.colLeft) * 0.45;
+      const firstRowY = asigInfo.tabBarBottom + 38;
+      const targetAtFirstRow = document.elementFromPoint(firstRowX, firstRowY);
+      if (targetAtFirstRow && !isElementInOurOverlay(targetAtFirstRow)) {
+        simulateRealClick(targetAtFirstRow);
+        await sleep(700);
+      }
+
+      if (isAnyTicketCurrentlyOpenInCenter()) {
+        await processCurrentOpenTicket(() => {
+          isStepInProgress = false;
+          scannerLoopTimeout = setTimeout(runNextScannerStep, 1800);
+        });
+        return;
+      }
+    }
+
+    // Caso 3: Si ya hay un chat abierto en el centro aunque la lista izquierda esté en 0
+    if (isAnyTicketCurrentlyOpenInCenter()) {
+      await processCurrentOpenTicket(() => {
+        isStepInProgress = false;
+        scannerLoopTimeout = setTimeout(runNextScannerStep, 2200);
+      });
+      return;
+    }
+
+    // Caso 4: Bandeja totalmente vacía ("Asignados(0)") -> Quedarse vigilando hasta que caiga uno
+    if (badge) {
+      badge.innerText = `👀 Bandeja vacía (Asignados: 0). Esperando nuevo ticket para abrirlo...`;
+    }
+    isStepInProgress = false;
+    scannerLoopTimeout = setTimeout(runNextScannerStep, 1500);
   }
 
   async function processCurrentOpenTicket(onDone) {
-    if (isDisabledInThisTab) return;
+    if (isDisabledInThisTab) {
+      onDone();
+      return;
+    }
     const badge = document.getElementById('lc-scanner-status');
 
     if (isConversationBlockedByHSM()) {
-      badge.innerText = `⛔ Conversación bloqueada por HSM. Saltando...`;
+      if (badge) badge.innerText = `⛔ Conversación bloqueada por HSM. Saltando...`;
       onDone();
       return;
     }
@@ -1349,12 +1542,11 @@
     if (doesCurrentChatAlreadyHaveSecondQuestion()) {
       const d = scanScreenForSubmotivo();
       if (d) markTicketAsAnswered(d.sot, d.ticketNum, d.signature);
-      badge.innerText = `✅ Ya respondido completo en chat. Saltando...`;
+      if (badge) badge.innerText = `✅ Ya respondido completo en chat. Saltando...`;
       onDone();
       return;
     }
 
-    // Lectura rápida inicial para ver si hay Submotivo visible; si no, hacer scroll rápido al tope
     let detected = scanScreenForSubmotivo();
     if (!detected) {
       const scrollData = await scrollChatAndCollectFullData();
@@ -1362,26 +1554,26 @@
     }
 
     if (!detected) {
-      badge.innerText = `🔍 Sin plantilla de técnico en este chat. Saltando...`;
+      if (badge) badge.innerText = `🔍 Sin plantilla de técnico en este chat. Saltando...`;
       onDone();
       return;
     }
 
     const storageCheck = wasTicketAlreadyAnsweredInStorage(detected.sot, detected.ticketNum, detected.signature);
     if (storageCheck.answered) {
-      badge.innerText = `🛡️ Anti-duplicado: ${storageCheck.reason} Saltando...`;
+      if (badge) badge.innerText = `🛡️ Anti-duplicado: ${storageCheck.reason} Saltando...`;
       onDone();
       return;
     }
 
     if (skippedTickets.has(detected.signature)) {
-      badge.innerText = `⏭️ Ticket omitido previamente. Saltando...`;
+      if (badge) badge.innerText = `⏭️ Ticket omitido previamente. Saltando...`;
       onDone();
       return;
     }
 
     if (detected.casuistica || !detected.rule) {
-      badge.innerText = `⚠️ Pausado: Casuística requiere tu decisión`;
+      if (badge) badge.innerText = `⚠️ Pausado: Casuística requiere tu decisión`;
       showToast("⚠️ Casuística detectada: revisa el panel", "warning");
 
       askAgentConfirmation(
@@ -1397,7 +1589,6 @@
       return;
     }
 
-    // Envía 1° el saludo DE INMEDIATO, espera 5 segundos, evalúa todo el chat y manda el 2° mensaje
     safeSendTwoStepSmartReply(detected.rule, detected, true, () => onDone());
   }
 
@@ -1608,7 +1799,7 @@
             ▶️ Auto-Escanear y Scrollear Chats
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            ⚡ Saludo inmediato (0s) ➔ Espera 5s por evidencias ➔ 2° Respuesta
+            Abre el ticket apenas cae ➔ Saludo (0s) ➔ (5s) ➔ 2° Respuesta
           </div>
         </div>
 
