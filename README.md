@@ -1,20 +1,20 @@
-# Laraigo Auto-Reply Copilot (v1.9.1) - Soporte Técnicos de Campo Claro
+# Laraigo Auto-Reply Copilot (v1.9.2) - Soporte Técnicos de Campo Claro
 
 Extensión para Google Chrome / Microsoft Edge diseñada para la bandeja de atención de **Laraigo** (`https://claro.laraigo.com/message_inbox`).
 
 ---
 
-## ✨ Novedades de la versión 1.9.1
+## ✨ Novedades de la versión 1.9.2
 
 - **Atención 100% Automática sin Entrar al Ticket (2° Plano por API + Socket.IO):**
   - **No necesitas hacer clic ni entrar al ticket** para que se notifique o se responda. Puedes quedarte trabajando en tu ticket actual en la misma pestaña sin que cambie de conversación ni mueva tu scroll.
   - Detecta la llegada de nuevos tickets en `Asignados` en tiempo real mediante `Socket.IO` y sondeo directo de `UFN_CONVERSATION_SEL_TICKETSBYUSER` (filtrando estrictamente `status === "ASIGNADO"`).
 - **Notificación Nativa de Windows al Instante (Sin entrar al ticket):**
   - Apenas cae un ticket en `Asignados`, lanza la notificación de Windows con el número de ticket y nombre del técnico (con filtro estricto de **1 sola vez por ticket**).
-- **Envío Automático en 2 Pasos (0s + 5s) sin pulsar botones:**
-  1. **Paso 1 (`0s` inmediato):** Envía `"Hola Técnico, Procederemos con la atención"` directo a `POST https://claroapi.laraigo.com/api/ticket/reply`.
+- **Envío Automático Garantizado del 1° y 2° Mensaje (0s + 5s) sin Recargar la Página:**
+  1. **Paso 1 (`0s` inmediato):** Envía `"Hola Técnico, Procederemos con la atención"` directo a `POST https://claroapi.laraigo.com/api/ticket/reply` y registra el ticket para no duplicar nunca el saludo al abrirlo.
   2. **Paso 2 (`5s` de espera en 2° plano):** Espera 5 segundos para que terminen de llegar las imágenes, videos o cintillos del técnico.
-  3. **Paso 3:** Consulta por API (`POST https://claroapi.laraigo.com/api/multi`) el `Submotivo:`, la `SOT`, los cintillos y las fotos enviadas, y manda automáticamente el **2° mensaje exacto**.
+  3. **Paso 3 (`5s` — Aislamiento puro por API + Reintentos automáticos):** Consulta por API (`POST /api/multi` con respaldo a `/api/main`) el `Submotivo:`, la `SOT`, los cintillos y las fotos enviadas exclusivamente del ticket nuevo (sin mezclar datos del ticket que tengas abierto en pantalla) y envía el **2° mensaje exacto** con reintentos automáticos sin necesidad de refrescar la página (`F5`).
 - **Control Independiente por Pestaña (`🟢 Activo` / `🔴 No activo`):**
   - La auto-atención en segundo plano arranca **encendida por defecto** en cualquier pestaña que esté en `🟢 Activo`. Puedes apagarla en una pestaña específica cambiando a `🔴 No activo`.
 

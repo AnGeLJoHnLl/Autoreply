@@ -1,10 +1,10 @@
 // ============================================================================
-// Laraigo Auto-Reply Copilot - Page Network Bridge (MAIN World) v1.9
+// Laraigo Auto-Reply Copilot - Page Network Bridge (MAIN World) v1.9.2
 // Trabaja 100% en segundo plano por API (sin cambiar de chat ni scrollear):
 //   1. Captura el Bearer Token (desde red y desde localStorage/sessionStorage)
 //   2. Lee respuestas XHR con responseType='json' o 'text' sin InvalidStateError
-//   3. Distingue la consulta de tickets ASIGNADO frente a PAUSADO/CERRADO
-//   4. Escucha eventos de Socket.IO / WebSocket para detectar tickets al instante
+//   3. Distingue llamadas de fondo (isFromBackground) de clics del usuario en la UI
+//   4. Consulta garantizada de interacciones y Submotivo en 2° plano (/api/multi + /api/main)
 //   5. Envía el saludo (0s) y la 2° respuesta (5s) directo a POST /api/ticket/reply
 // ============================================================================
 
@@ -19,6 +19,7 @@
   let learnedPersonMethodTemplate = null;
   let learnedAssignedTicketsTemplate = null;
   let learnedAssignedTicketsEndpoint = '/api/main';
+  let learnedMultiUsesDataWrapper = false;
 
   const cachedAssignedTicketsMap = new Map();
   const cachedInteractionsMap = new Map();
@@ -33,6 +34,8 @@
     if (savedTkt) learnedAssignedTicketsTemplate = JSON.parse(savedTkt);
     const savedEnd = localStorage.getItem('__lc_tpl_assigned_ep');
     if (savedEnd) learnedAssignedTicketsEndpoint = savedEnd;
+    const savedWrap = localStorage.getItem('__lc_tpl_multi_wrap');
+    if (savedWrap) learnedMultiUsesDataWrapper = savedWrap === 'true';
   } catch (e) {}
 
   function generateUUID() {
@@ -135,8 +138,29 @@
       if (!url.includes('/multi') && !url.includes('/main')) return;
 
       const parsed = JSON.parse(bodyStr);
-      const isArray = Array.isArray(parsed);
-      const items = isArray ? parsed : (Array.isArray(parsed?.data) ? parsed.data : [parsed]);
+      let wrapperType = 'object';
+      let items = [];
+
+      if (Array.isArray(parsed)) {
+        wrapperType = 'array';
+        items = parsed;
+      } else if (parsed && Array.isArray(parsed.data)) {
+        wrapperType = 'data_array';
+        items = parsed.data;
+      } else if (parsed && parsed.data && typeof parsed.data === 'object') {
+        wrapperType = 'data_object';
+        items = [parsed.data];
+      } else if (parsed && typeof parsed === 'object') {
+        wrapperType = 'object';
+        items = [parsed];
+      }
+
+      if (url.includes('/multi')) {
+        learnedMultiUsesDataWrapper = wrapperType === 'data_array';
+        try {
+          localStorage.setItem('__lc_tpl_multi_wrap', String(learnedMultiUsesDataWrapper));
+        } catch (e) {}
+      }
 
       for (const item of items) {
         if (!item || typeof item !== 'object') continue;
@@ -171,11 +195,18 @@
             key.toUpperCase().includes('PAUSED');
           const isExplicitAssigned = paramStr.includes('ASIGNAD');
 
-          // Guardar siempre la plantilla de ASIGNADO y nunca sobrescribirla con CERRADO o PAUSADO
+          // Guardar siempre la plantilla de ASIGNADO preservando el envoltorio exacto ({data:...} o [...] o {...})
           if (isExplicitAssigned || (!isClosedOrPaused && !learnedAssignedTicketsTemplate)) {
-            learnedAssignedTicketsTemplate = isArray
-              ? [JSON.parse(JSON.stringify(item))]
-              : JSON.parse(JSON.stringify(item));
+            const clonedItem = JSON.parse(JSON.stringify(item));
+            if (wrapperType === 'array') {
+              learnedAssignedTicketsTemplate = [clonedItem];
+            } else if (wrapperType === 'data_array') {
+              learnedAssignedTicketsTemplate = { data: [clonedItem] };
+            } else if (wrapperType === 'data_object') {
+              learnedAssignedTicketsTemplate = { data: clonedItem };
+            } else {
+              learnedAssignedTicketsTemplate = clonedItem;
+            }
             learnedAssignedTicketsEndpoint = url.includes('/multi') ? '/api/multi' : '/api/main';
             try {
               localStorage.setItem('__lc_tpl_assigned_tickets', JSON.stringify(learnedAssignedTicketsTemplate));
@@ -187,7 +218,7 @@
     } catch (e) {}
   }
 
-  function inspectIncomingJsonResponse(url, json) {
+  function inspectIncomingJsonResponse(url, json, isFromBackground = false) {
     if (!json || typeof json !== 'object') return;
     try {
       const blocks = [];
@@ -206,7 +237,6 @@
         const rows = Array.isArray(block.data) ? block.data : [];
 
         // 1. Lista de tickets de UFN_CONVERSATION_SEL_TICKETSBYUSER
-        // Nota: Tanto ASIGNADO como CERRADO devuelven la misma key "UFN_CONVERSATION_SEL_TICKETSBYUSER_<userid>"
         if (key.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER')) {
           const assignedRows = rows.filter(
             (r) => r && String(r.status || '').toUpperCase() === 'ASIGNADO'
@@ -217,7 +247,8 @@
             }
             postToContentScript('ASSIGNED_TICKETS', {
               key,
-              tickets: assignedRows
+              tickets: assignedRows,
+              isFromBackground
             });
           }
         }
@@ -225,13 +256,16 @@
         // 2. Mensajes / interacciones dentro de un ticket
         if (key.startsWith('UFN_CONVERSATION_SEL_INTERACTION')) {
           const convIdMatch = key.match(/(\d+)$/);
-          const conversationid = convIdMatch ? Number(convIdMatch[1]) : (rows[0]?.conversationid ? Number(rows[0].conversationid) : null);
+          const conversationid = convIdMatch
+            ? Number(convIdMatch[1])
+            : (rows[0]?.conversationid ? Number(rows[0].conversationid) : null);
           if (conversationid && (rows.length > 0 || block.success)) {
             cachedInteractionsMap.set(conversationid, rows);
             postToContentScript('INTERACTIONS', {
               key,
               conversationid,
-              interactions: rows
+              interactions: rows,
+              isFromBackground
             });
           }
         }
@@ -243,7 +277,8 @@
           if (tNum) cachedPersonsMap.set(tNum, p);
           postToContentScript('PERSON_CONTEXT', {
             key,
-            person: p
+            person: p,
+            isFromBackground
           });
         }
       }
@@ -252,7 +287,6 @@
 
   // ==========================================================================
   // DETECTOR DE EVENTOS EN TIEMPO REAL DE SOCKET.IO (XHR Polling + WebSocket)
-  // Cuando llega un evento de nuevo ticket por socket.io, consulta Asignados al instante
   // ==========================================================================
   let socketPollTimer = null;
   function scheduleImmediateAssignedPoll(delayMs = 350) {
@@ -301,7 +335,8 @@
   XMLHttpRequest.prototype.send = function (body) {
     try {
       const url = this.__laraigoUrl || '';
-      if (url.includes('laraigo.com') || url.startsWith('/')) {
+      const isInternalBg = Boolean(this.__laraigoIsBg);
+      if (!isInternalBg && (url.includes('laraigo.com') || url.startsWith('/'))) {
         if (typeof body === 'string') {
           inspectOutgoingBody(url, body);
         }
@@ -329,7 +364,7 @@
             }
 
             if (json) {
-              inspectIncomingJsonResponse(url, json);
+              inspectIncomingJsonResponse(url, json, false);
             }
           } catch (e) {}
         });
@@ -368,7 +403,7 @@
         if ((url.includes('laraigo.com') || url.startsWith('/')) && response && response.ok) {
           const clone = response.clone();
           clone.json().then((json) => {
-            inspectIncomingJsonResponse(url, json);
+            inspectIncomingJsonResponse(url, json, false);
           }).catch(() => {});
         }
       } catch (e) {}
@@ -402,7 +437,7 @@
   // ==========================================================================
   // 4. PETICIONES POST A LA API DE LARAIGO (SIN PROBLEMAS DE CORS)
   // ==========================================================================
-  async function apiPostJson(endpointPath, payloadObj) {
+  async function apiPostJson(endpointPath, payloadObj, isFromBackground = true) {
     tryDiscoverTokenFromStorage();
     if (!capturedBearerToken) {
       return { ok: false, status: 0, data: null, reason: 'NO_BEARER_TOKEN' };
@@ -411,7 +446,6 @@
     const fullUrl = endpointPath.startsWith('http') ? endpointPath : `${apiOrigin}${endpointPath}`;
     const bodyString = JSON.stringify(payloadObj);
 
-    // Usar origFetch SIN credentials:'include' (igual que Angular HttpClient con Bearer token)
     try {
       const res = await origFetch(fullUrl, {
         method: 'POST',
@@ -427,14 +461,14 @@
         data = await res.json();
       } catch (e) {}
       if (data) {
-        inspectIncomingJsonResponse(fullUrl, data);
+        inspectIncomingJsonResponse(fullUrl, data, isFromBackground);
       }
       return { ok: res.ok, status: res.status, data };
     } catch (fetchErr) {
-      // Respaldo por XMLHttpRequest nativo si fetch fallara
       return new Promise((resolve) => {
         try {
           const xhr = new XMLHttpRequest();
+          xhr.__laraigoIsBg = true;
           origOpen.call(xhr, 'POST', fullUrl, true);
           origSetRequestHeader.call(xhr, 'Accept', 'application/json, text/plain, */*');
           origSetRequestHeader.call(xhr, 'Content-Type', 'application/json');
@@ -444,7 +478,7 @@
             try {
               data = JSON.parse(xhr.responseText || 'null');
             } catch (e) {}
-            if (data) inspectIncomingJsonResponse(fullUrl, data);
+            if (data) inspectIncomingJsonResponse(fullUrl, data, isFromBackground);
             resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
           };
           xhr.onerror = function () {
@@ -462,42 +496,96 @@
     tryDiscoverTokenFromStorage();
     if (!capturedBearerToken) return { ok: false };
 
-    let queryPayload = learnedAssignedTicketsTemplate;
-    let endpoint = learnedAssignedTicketsEndpoint || '/api/main';
-
-    if (!queryPayload) {
-      const uid = getUserIdFromToken();
-      if (!uid) return { ok: false };
-      queryPayload = {
-        method: 'UFN_CONVERSATION_SEL_TICKETSBYUSER',
-        key: `UFN_CONVERSATION_SEL_TICKETSBYUSER_${uid}`,
-        parameters: {
-          userid: Number(uid),
-          status: 'ASIGNADO'
-        }
-      };
-      endpoint = '/api/main';
+    if (learnedAssignedTicketsTemplate) {
+      const endpoint = learnedAssignedTicketsEndpoint || '/api/main';
+      const res = await apiPostJson(endpoint, learnedAssignedTicketsTemplate, true);
+      if (res.ok && res.data) return res;
     }
 
-    return apiPostJson(endpoint, queryPayload);
+    const uid = getUserIdFromToken();
+    if (!uid) return { ok: false };
+
+    const rawItem = {
+      method: 'UFN_CONVERSATION_SEL_TICKETSBYUSER',
+      key: `UFN_CONVERSATION_SEL_TICKETSBYUSER_${uid}`,
+      parameters: {
+        userid: Number(uid),
+        status: 'ASIGNADO'
+      }
+    };
+
+    let res = await apiPostJson('/api/main', rawItem, true);
+    if (!res.ok || !res.data) {
+      res = await apiPostJson('/api/main', { data: rawItem }, true);
+    }
+    return res;
   }
 
-  async function fetchConversationDetailsInBackground(conversationid, personid) {
+  function extractInteractionsAndPersonFromResponse(resJson, conversationid, personid, ticketnum) {
+    let interactions = [];
+    let person = null;
+
+    const blocks = [];
+    if (resJson && typeof resJson === 'object') {
+      if (typeof resJson.key === 'string' && Array.isArray(resJson.data)) {
+        blocks.push(resJson);
+      } else if (Array.isArray(resJson.data)) {
+        for (const b of resJson.data) {
+          if (b && typeof b === 'object') blocks.push(b);
+        }
+      }
+    }
+
+    for (const block of blocks) {
+      if (!block || !Array.isArray(block.data)) continue;
+      const k = String(block.key || '');
+      if (k.startsWith('UFN_CONVERSATION_SEL_INTERACTION') && block.data.length > 0) {
+        interactions = block.data;
+      }
+      if (k.startsWith('UFN_CONVERSATION_PERSON_SEL') && block.data.length > 0) {
+        const candidate = block.data[0];
+        if (candidate) {
+          const candTkt = String(candidate.ticketnum || candidate.variablecontext?.ticketnum || '').trim();
+          const candConv = String(candidate.variablecontext?.conversationid || '').trim();
+          const candPer = String(candidate.personid || candidate.variablecontext?.personid || '').trim();
+          const matchesTarget =
+            (ticketnum && candTkt && candTkt === String(ticketnum).trim()) ||
+            (conversationid && candConv && candConv === String(conversationid).trim()) ||
+            (personid && candPer && candPer === String(personid).trim());
+          if (matchesTarget || !person) {
+            person = candidate;
+          }
+        }
+      }
+    }
+
+    return { interactions, person };
+  }
+
+  async function fetchConversationDetailsInBackground(conversationid, personid, ticketnum) {
     tryDiscoverTokenFromStorage();
     if (!capturedBearerToken || !conversationid) {
       return { ok: false, reason: 'MISSING_TOKEN_OR_CONVID', interactions: [], person: null };
     }
 
-    const multiPayload = [];
+    const multiItems = [];
 
+    // 1. Construir consulta UFN_CONVERSATION_SEL_INTERACTION
     if (learnedInteractionMethodTemplate) {
       const q = JSON.parse(JSON.stringify(learnedInteractionMethodTemplate));
+      const oldConvMatch = String(q.key || '').match(/(\d+)$/);
+      const oldConvIdStr = oldConvMatch ? oldConvMatch[1] : null;
       q.key = `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`;
-      if (q.parameters) {
+      if (q.parameters && typeof q.parameters === 'object') {
         const paramKeys = Object.keys(q.parameters);
         let replaced = false;
         for (const k of paramKeys) {
-          if (k.toLowerCase().includes('conv') || paramKeys.length === 1) {
+          const valStr = String(q.parameters[k] ?? '');
+          if (
+            k.toLowerCase().includes('conv') ||
+            paramKeys.length === 1 ||
+            (oldConvIdStr && valStr === oldConvIdStr)
+          ) {
             q.parameters[k] = typeof q.parameters[k] === 'string' ? String(conversationid) : Number(conversationid);
             replaced = true;
           }
@@ -506,9 +594,9 @@
           q.parameters.conversationid = Number(conversationid);
         }
       }
-      multiPayload.push(q);
+      multiItems.push(q);
     } else {
-      multiPayload.push({
+      multiItems.push({
         method: 'UFN_CONVERSATION_SEL_INTERACTION',
         key: `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`,
         parameters: {
@@ -517,46 +605,87 @@
       });
     }
 
-    if (personid && learnedPersonMethodTemplate) {
-      const pq = JSON.parse(JSON.stringify(learnedPersonMethodTemplate));
-      pq.key = 'UFN_CONVERSATION_PERSON_SEL';
-      if (pq.parameters) {
-        const pKeys = Object.keys(pq.parameters);
-        for (const k of pKeys) {
-          if (k.toLowerCase().includes('person') || (pKeys.length === 1 && !k.toLowerCase().includes('conv'))) {
-            pq.parameters[k] = typeof pq.parameters[k] === 'string' ? String(personid) : Number(personid);
-          }
-          if (k.toLowerCase().includes('conv')) {
-            pq.parameters[k] = typeof pq.parameters[k] === 'string' ? String(conversationid) : Number(conversationid);
+    // 2. Construir consulta UFN_CONVERSATION_PERSON_SEL (incluso si aún no se aprendió plantilla)
+    if (personid) {
+      if (learnedPersonMethodTemplate) {
+        const pq = JSON.parse(JSON.stringify(learnedPersonMethodTemplate));
+        pq.key = 'UFN_CONVERSATION_PERSON_SEL';
+        if (pq.parameters && typeof pq.parameters === 'object') {
+          const pKeys = Object.keys(pq.parameters);
+          let replacedPerson = false;
+          for (const k of pKeys) {
+            const kl = k.toLowerCase();
+            if (kl.includes('person') || (pKeys.length === 1 && !kl.includes('conv'))) {
+              pq.parameters[k] = typeof pq.parameters[k] === 'string' ? String(personid) : Number(personid);
+              replacedPerson = true;
+            } else if (kl.includes('conv')) {
+              pq.parameters[k] = typeof pq.parameters[k] === 'string' ? String(conversationid) : Number(conversationid);
+            } else if (kl.includes('ticket') && ticketnum) {
+              pq.parameters[k] = String(ticketnum);
+            } else if ((kl === 'id' || kl === 'p_id') && !replacedPerson) {
+              pq.parameters[k] = typeof pq.parameters[k] === 'string' ? String(personid) : Number(personid);
+              replacedPerson = true;
+            }
           }
         }
+        multiItems.push(pq);
+      } else {
+        multiItems.push({
+          method: 'UFN_CONVERSATION_PERSON_SEL',
+          key: 'UFN_CONVERSATION_PERSON_SEL',
+          parameters: {
+            personid: Number(personid),
+            conversationid: Number(conversationid)
+          }
+        });
       }
-      multiPayload.push(pq);
     }
 
-    const res = await apiPostJson('/api/multi', multiPayload);
-    const resJson = res.data;
+    // Intentar primero con el formato aprendido (array directo o { data: array })
+    const primaryPayload = learnedMultiUsesDataWrapper ? { data: multiItems } : multiItems;
+    let res = await apiPostJson('/api/multi', primaryPayload, true);
+    let extracted = extractInteractionsAndPersonFromResponse(res.data, conversationid, personid, ticketnum);
 
-    let interactions = cachedInteractionsMap.get(Number(conversationid)) || [];
-    let person = null;
+    // Si no devolvió interacciones, probar el formato alternativo ({ data: multiItems } vs multiItems)
+    if (extracted.interactions.length === 0) {
+      const altPayload = learnedMultiUsesDataWrapper ? multiItems : { data: multiItems };
+      const altRes = await apiPostJson('/api/multi', altPayload, true);
+      const altExtracted = extractInteractionsAndPersonFromResponse(altRes.data, conversationid, personid, ticketnum);
+      if (altExtracted.interactions.length > 0 || altExtracted.person) {
+        res = altRes;
+        extracted = altExtracted;
+      }
+    }
 
-    if (resJson && Array.isArray(resJson.data)) {
-      for (const block of resJson.data) {
-        if (!block || !Array.isArray(block.data)) continue;
-        const k = String(block.key || '');
-        if (k.startsWith('UFN_CONVERSATION_SEL_INTERACTION') && block.data.length > 0) {
-          interactions = block.data;
-        }
-        if (k.startsWith('UFN_CONVERSATION_PERSON_SEL') && block.data.length > 0) {
-          person = block.data[0];
+    // Si aún no devolvió interacciones, probar vía /api/main con el primer ítem
+    if (extracted.interactions.length === 0 && multiItems.length > 0) {
+      const mainRes = await apiPostJson('/api/main', multiItems[0], true);
+      const mainExtracted = extractInteractionsAndPersonFromResponse(mainRes.data, conversationid, personid, ticketnum);
+      if (mainExtracted.interactions.length > 0) {
+        extracted.interactions = mainExtracted.interactions;
+      } else {
+        const mainWrappedRes = await apiPostJson('/api/main', { data: multiItems[0] }, true);
+        const mainWrappedExtracted = extractInteractionsAndPersonFromResponse(mainWrappedRes.data, conversationid, personid, ticketnum);
+        if (mainWrappedExtracted.interactions.length > 0) {
+          extracted.interactions = mainWrappedExtracted.interactions;
         }
       }
     }
+
+    const finalInteractions =
+      extracted.interactions.length > 0
+        ? extracted.interactions
+        : (cachedInteractionsMap.get(Number(conversationid)) || []);
+
+    const finalPerson =
+      extracted.person ||
+      (ticketnum ? cachedPersonsMap.get(String(ticketnum).trim()) : null) ||
+      null;
 
     return {
-      ok: res.ok,
-      interactions,
-      person
+      ok: Boolean(res && res.ok) || finalInteractions.length > 0 || Boolean(finalPerson),
+      interactions: finalInteractions,
+      person: finalPerson
     };
   }
 
@@ -574,20 +703,23 @@
       if (cachedAssignedTicketsMap.size > 0) {
         postToContentScript('ASSIGNED_TICKETS', {
           key: 'UFN_CONVERSATION_SEL_TICKETSBYUSER_CACHE',
-          tickets: Array.from(cachedAssignedTicketsMap.values())
+          tickets: Array.from(cachedAssignedTicketsMap.values()),
+          isFromBackground: true
         });
       }
       for (const [convId, rows] of cachedInteractionsMap.entries()) {
         postToContentScript('INTERACTIONS', {
           key: `UFN_CONVERSATION_SEL_INTERACTION_${convId}`,
           conversationid: convId,
-          interactions: rows
+          interactions: rows,
+          isFromBackground: true
         });
       }
       for (const p of cachedPersonsMap.values()) {
         postToContentScript('PERSON_CONTEXT', {
           key: 'UFN_CONVERSATION_PERSON_SEL',
-          person: p
+          person: p,
+          isFromBackground: true
         });
       }
       pollAssignedTicketsInBackground();
@@ -617,20 +749,23 @@
           return;
         }
 
+        const tNum = String(ticketMeta.ticketnum || '').trim();
+        const freshestTicket = (tNum && cachedAssignedTicketsMap.get(tNum)) || ticketMeta;
+
         const replyBody = {
           data: {
-            p_conversationid: Number(ticketMeta.conversationid),
-            p_personid: Number(ticketMeta.personid),
-            p_communicationchannelid: Number(ticketMeta.communicationchannelid || 64),
-            p_messagesourcekey1: String(ticketMeta.personcommunicationchannel || ''),
+            p_conversationid: Number(freshestTicket.conversationid || ticketMeta.conversationid),
+            p_personid: Number(freshestTicket.personid || ticketMeta.personid),
+            p_communicationchannelid: Number(freshestTicket.communicationchannelid || ticketMeta.communicationchannelid || 64),
+            p_messagesourcekey1: String(freshestTicket.personcommunicationchannel || ticketMeta.personcommunicationchannel || ''),
             p_messagetext: String(messageText),
             p_type: 'text',
-            communicationchannelsite: String(ticketMeta.communicationchannelsite || '51915021111'),
-            communicationchanneltype: String(ticketMeta.communicationchanneltype || 'WHAL'),
-            postexternalid: ticketMeta.postexternalid || null,
-            commentexternalid: ticketMeta.commentexternalid || null,
-            replyexternalid: ticketMeta.replyexternalid || null,
-            ticketnum: String(ticketMeta.ticketnum || ''),
+            communicationchannelsite: String(freshestTicket.communicationchannelsite || ticketMeta.communicationchannelsite || '51915021111'),
+            communicationchanneltype: String(freshestTicket.communicationchanneltype || ticketMeta.communicationchanneltype || 'WHAL'),
+            postexternalid: freshestTicket.postexternalid || ticketMeta.postexternalid || null,
+            commentexternalid: freshestTicket.commentexternalid || ticketMeta.commentexternalid || null,
+            replyexternalid: freshestTicket.replyexternalid || ticketMeta.replyexternalid || null,
+            ticketnum: tNum,
             uuid: generateUUID(),
             validateUserOnTicket: true,
             newanswered: Boolean(isFirstReply),
@@ -639,7 +774,7 @@
           }
         };
 
-        const res = await apiPostJson('/api/ticket/reply', replyBody);
+        const res = await apiPostJson('/api/ticket/reply', replyBody, true);
         const ok = res.ok && (!res.data || res.data.error !== true);
 
         postToContentScript('API_REPLY_RESULT', {
@@ -660,8 +795,8 @@
     // Acción B: Consultar mensajes y Submotivo de una conversación en segundo plano
     if (action === 'FETCH_CONVERSATION_INTERACTIONS') {
       try {
-        const { conversationid, personid } = payload || {};
-        const result = await fetchConversationDetailsInBackground(conversationid, personid);
+        const { conversationid, personid, ticketnum } = payload || {};
+        const result = await fetchConversationDetailsInBackground(conversationid, personid, ticketnum);
         postToContentScript('FETCH_INTERACTIONS_RESULT', Object.assign({ requestId }, result));
       } catch (err) {
         postToContentScript('FETCH_INTERACTIONS_RESULT', {

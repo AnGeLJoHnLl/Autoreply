@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Laraigo Auto-Reply Copilot",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "description": "Automatización inteligente en 2° plano para Laraigo Inbox (Claro): lee Submotivo y responde por API sin cambiar de chat ni scrollear.",
   "permissions": [
     "storage",
