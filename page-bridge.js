@@ -1,10 +1,11 @@
 // ============================================================================
-// Laraigo Auto-Reply Copilot - Page Network Bridge (MAIN World) v1.8
+// Laraigo Auto-Reply Copilot - Page Network Bridge (MAIN World) v1.9
 // Trabaja 100% en segundo plano por API (sin cambiar de chat ni scrollear):
-//   1. Captura el Bearer Token y las plantillas de consulta de /api/main y /api/multi
-//   2. Consulta tickets en Asignados (UFN_CONVERSATION_SEL_TICKETSBYUSER)
-//   3. Consulta mensajes y Submotivo de cualquier conversación (UFN_CONVERSATION_SEL_INTERACTION + PERSON_SEL)
-//   4. Envía el saludo (0s) y la 2° respuesta (5s) directo a POST /api/ticket/reply
+//   1. Captura el Bearer Token (desde red y desde localStorage/sessionStorage)
+//   2. Lee respuestas XHR con responseType='json' o 'text' sin InvalidStateError
+//   3. Distingue la consulta de tickets ASIGNADO frente a PAUSADO/CERRADO
+//   4. Escucha eventos de Socket.IO / WebSocket para detectar tickets al instante
+//   5. Envía el saludo (0s) y la 2° respuesta (5s) directo a POST /api/ticket/reply
 // ============================================================================
 
 (function () {
@@ -16,18 +17,22 @@
 
   let learnedInteractionMethodTemplate = null;
   let learnedPersonMethodTemplate = null;
-  let learnedTicketsQueryTemplate = null;
-  let learnedTicketsQueryEndpoint = '/api/main';
+  let learnedAssignedTicketsTemplate = null;
+  let learnedAssignedTicketsEndpoint = '/api/main';
+
+  const cachedAssignedTicketsMap = new Map();
+  const cachedInteractionsMap = new Map();
+  const cachedPersonsMap = new Map();
 
   try {
     const savedInt = localStorage.getItem('__lc_tpl_interaction');
     if (savedInt) learnedInteractionMethodTemplate = JSON.parse(savedInt);
     const savedPer = localStorage.getItem('__lc_tpl_person');
     if (savedPer) learnedPersonMethodTemplate = JSON.parse(savedPer);
-    const savedTkt = localStorage.getItem('__lc_tpl_tickets');
-    if (savedTkt) learnedTicketsQueryTemplate = JSON.parse(savedTkt);
-    const savedEnd = localStorage.getItem('__lc_tpl_tickets_ep');
-    if (savedEnd) learnedTicketsQueryEndpoint = savedEnd;
+    const savedTkt = localStorage.getItem('__lc_tpl_assigned_tickets');
+    if (savedTkt) learnedAssignedTicketsTemplate = JSON.parse(savedTkt);
+    const savedEnd = localStorage.getItem('__lc_tpl_assigned_ep');
+    if (savedEnd) learnedAssignedTicketsEndpoint = savedEnd;
   } catch (e) {}
 
   function generateUUID() {
@@ -51,7 +56,7 @@
   }
 
   function saveAuthHeaderIfValid(headerVal) {
-    if (typeof headerVal === 'string' && headerVal.toLowerCase().startsWith('bearer ')) {
+    if (typeof headerVal === 'string' && headerVal.trim().toLowerCase().startsWith('bearer ')) {
       capturedBearerToken = headerVal.trim();
       try {
         localStorage.setItem('__lc_bearer_token', capturedBearerToken);
@@ -60,11 +65,71 @@
     }
   }
 
+  // Buscar token JWT en localStorage / sessionStorage por si ya existe al abrir la pestaña
+  function tryDiscoverTokenFromStorage() {
+    if (capturedBearerToken) return;
+    const storages = [window.localStorage, window.sessionStorage];
+    for (const st of storages) {
+      if (!st) continue;
+      try {
+        for (let i = 0; i < st.length; i++) {
+          const k = st.key(i);
+          if (!k || k.startsWith('__lc_')) continue;
+          const val = st.getItem(k) || '';
+          if (/^Bearer\s+eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(val.trim())) {
+            saveAuthHeaderIfValid(val.trim());
+            return;
+          }
+          if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(val.trim())) {
+            saveAuthHeaderIfValid('Bearer ' + val.trim());
+            return;
+          }
+          if (val.includes('eyJ')) {
+            const match = val.match(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+            if (match) {
+              saveAuthHeaderIfValid('Bearer ' + match[0]);
+              return;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  function getUserIdFromToken() {
+    tryDiscoverTokenFromStorage();
+    if (!capturedBearerToken) return null;
+    try {
+      const rawJwt = capturedBearerToken.replace(/^Bearer\s+/i, '').trim();
+      const parts = rawJwt.split('.');
+      if (parts.length < 2) return null;
+      const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const jsonPayload = decodeURIComponent(
+        atob(base64)
+          .split('')
+          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+      const parsed = JSON.parse(jsonPayload);
+      return (
+        parsed?.user?.userid ||
+        parsed?.user?.id ||
+        parsed?.userid ||
+        parsed?.id ||
+        null
+      );
+    } catch (e) {
+      return null;
+    }
+  }
+
+  tryDiscoverTokenFromStorage();
+
   function inspectOutgoingBody(url, bodyStr) {
     if (!bodyStr || typeof bodyStr !== 'string') return;
     try {
       if (url.includes('claroapi.laraigo.com')) {
-        const u = new URL(url);
+        const u = new URL(url, window.location.origin);
         apiOrigin = u.origin;
       }
       if (!url.includes('/multi') && !url.includes('/main')) return;
@@ -93,16 +158,30 @@
         }
 
         if (
-          (method.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER') || key.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER')) &&
-          !key.includes('_CLOSED_') &&
-          !key.includes('_PAUSED_')
+          method.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER') ||
+          key.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER')
         ) {
-          learnedTicketsQueryTemplate = isArray ? [JSON.parse(JSON.stringify(item))] : JSON.parse(JSON.stringify(item));
-          learnedTicketsQueryEndpoint = url.includes('/multi') ? '/api/multi' : '/api/main';
-          try {
-            localStorage.setItem('__lc_tpl_tickets', JSON.stringify(learnedTicketsQueryTemplate));
-            localStorage.setItem('__lc_tpl_tickets_ep', learnedTicketsQueryEndpoint);
-          } catch (e) {}
+          const paramStr = JSON.stringify(item.parameters || {}).toUpperCase();
+          const isClosedOrPaused =
+            paramStr.includes('CERRAD') ||
+            paramStr.includes('PAUSAD') ||
+            paramStr.includes('CLOSED') ||
+            paramStr.includes('PAUSED') ||
+            key.toUpperCase().includes('CLOSED') ||
+            key.toUpperCase().includes('PAUSED');
+          const isExplicitAssigned = paramStr.includes('ASIGNAD');
+
+          // Guardar siempre la plantilla de ASIGNADO y nunca sobrescribirla con CERRADO o PAUSADO
+          if (isExplicitAssigned || (!isClosedOrPaused && !learnedAssignedTicketsTemplate)) {
+            learnedAssignedTicketsTemplate = isArray
+              ? [JSON.parse(JSON.stringify(item))]
+              : JSON.parse(JSON.stringify(item));
+            learnedAssignedTicketsEndpoint = url.includes('/multi') ? '/api/multi' : '/api/main';
+            try {
+              localStorage.setItem('__lc_tpl_assigned_tickets', JSON.stringify(learnedAssignedTicketsTemplate));
+              localStorage.setItem('__lc_tpl_assigned_ep', learnedAssignedTicketsEndpoint);
+            } catch (e) {}
+          }
         }
       }
     } catch (e) {}
@@ -126,23 +205,29 @@
         const key = String(block.key || '');
         const rows = Array.isArray(block.data) ? block.data : [];
 
-        // 1. Lista de tickets en bandeja "Asignados"
-        if (
-          key.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER') &&
-          !key.includes('_CLOSED_') &&
-          !key.includes('_PAUSED_')
-        ) {
-          postToContentScript('ASSIGNED_TICKETS', {
-            key,
-            tickets: rows
-          });
+        // 1. Lista de tickets de UFN_CONVERSATION_SEL_TICKETSBYUSER
+        // Nota: Tanto ASIGNADO como CERRADO devuelven la misma key "UFN_CONVERSATION_SEL_TICKETSBYUSER_<userid>"
+        if (key.startsWith('UFN_CONVERSATION_SEL_TICKETSBYUSER')) {
+          const assignedRows = rows.filter(
+            (r) => r && String(r.status || '').toUpperCase() === 'ASIGNADO'
+          );
+          if (assignedRows.length > 0) {
+            for (const t of assignedRows) {
+              if (t.ticketnum) cachedAssignedTicketsMap.set(String(t.ticketnum).trim(), t);
+            }
+            postToContentScript('ASSIGNED_TICKETS', {
+              key,
+              tickets: assignedRows
+            });
+          }
         }
 
         // 2. Mensajes / interacciones dentro de un ticket
         if (key.startsWith('UFN_CONVERSATION_SEL_INTERACTION')) {
           const convIdMatch = key.match(/(\d+)$/);
-          const conversationid = convIdMatch ? Number(convIdMatch[1]) : null;
-          if (rows.length > 0 || block.success) {
+          const conversationid = convIdMatch ? Number(convIdMatch[1]) : (rows[0]?.conversationid ? Number(rows[0].conversationid) : null);
+          if (conversationid && (rows.length > 0 || block.success)) {
+            cachedInteractionsMap.set(conversationid, rows);
             postToContentScript('INTERACTIONS', {
               key,
               conversationid,
@@ -153,9 +238,12 @@
 
         // 3. Datos completos del técnico y variablecontext (incluye useranswer con SOT y Submotivo)
         if (key.startsWith('UFN_CONVERSATION_PERSON_SEL') && rows.length > 0) {
+          const p = rows[0];
+          const tNum = String(p.ticketnum || p.variablecontext?.ticketnum || '').trim();
+          if (tNum) cachedPersonsMap.set(tNum, p);
           postToContentScript('PERSON_CONTEXT', {
             key,
-            person: rows[0]
+            person: p
           });
         }
       }
@@ -163,7 +251,33 @@
   }
 
   // ==========================================================================
-  // 1. HOOK XMLHttpRequest
+  // DETECTOR DE EVENTOS EN TIEMPO REAL DE SOCKET.IO (XHR Polling + WebSocket)
+  // Cuando llega un evento de nuevo ticket por socket.io, consulta Asignados al instante
+  // ==========================================================================
+  let socketPollTimer = null;
+  function scheduleImmediateAssignedPoll(delayMs = 350) {
+    clearTimeout(socketPollTimer);
+    socketPollTimer = setTimeout(() => {
+      pollAssignedTicketsInBackground();
+    }, delayMs);
+  }
+
+  function inspectSocketIoTextPayload(rawText) {
+    if (!rawText || typeof rawText !== 'string') return;
+    if (
+      rawText.includes('ASIGNADO') ||
+      rawText.includes('ticket') ||
+      rawText.includes('conversation') ||
+      rawText.includes('interaction') ||
+      rawText.includes('holding') ||
+      rawText.includes('42[')
+    ) {
+      scheduleImmediateAssignedPoll(250);
+    }
+  }
+
+  // ==========================================================================
+  // 1. HOOK XMLHttpRequest (Soporta responseType='json' y 'text' sin errores)
   // ==========================================================================
   const origOpen = XMLHttpRequest.prototype.open;
   const origSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
@@ -187,14 +301,34 @@
   XMLHttpRequest.prototype.send = function (body) {
     try {
       const url = this.__laraigoUrl || '';
-      if (url.includes('laraigo.com')) {
+      if (url.includes('laraigo.com') || url.startsWith('/')) {
         if (typeof body === 'string') {
           inspectOutgoingBody(url, body);
         }
         this.addEventListener('load', function () {
           try {
-            if (this.status >= 200 && this.status < 300 && this.responseText) {
-              const json = JSON.parse(this.responseText);
+            if (this.status < 200 || this.status >= 300) return;
+
+            if (url.includes('socket.io')) {
+              if (!this.responseType || this.responseType === 'text') {
+                inspectSocketIoTextPayload(this.responseText);
+              }
+              return;
+            }
+
+            let json = null;
+            if (this.responseType === 'json') {
+              json = this.response;
+            } else if (!this.responseType || this.responseType === 'text') {
+              const txt = this.responseText;
+              if (txt && (txt.startsWith('{') || txt.startsWith('['))) {
+                json = JSON.parse(txt);
+              }
+            } else if (this.response && typeof this.response === 'object') {
+              json = this.response;
+            }
+
+            if (json) {
               inspectIncomingJsonResponse(url, json);
             }
           } catch (e) {}
@@ -223,7 +357,7 @@
             }
           }
         }
-        if (init && typeof init.body === 'string' && url.includes('laraigo.com')) {
+        if (init && typeof init.body === 'string' && (url.includes('laraigo.com') || url.startsWith('/'))) {
           inspectOutgoingBody(url, init.body);
         }
       } catch (e) {}
@@ -231,7 +365,7 @@
       const response = await origFetch.apply(this, arguments);
 
       try {
-        if (url.includes('laraigo.com') && response && response.ok) {
+        if ((url.includes('laraigo.com') || url.startsWith('/')) && response && response.ok) {
           const clone = response.clone();
           clone.json().then((json) => {
             inspectIncomingJsonResponse(url, json);
@@ -244,11 +378,114 @@
   }
 
   // ==========================================================================
-  // 3. COMANDOS DESDE CONTENT.JS (100% EN SEGUNDO PLANO SIN TOCAR LA PANTALLA)
+  // 3. HOOK WebSocket (para detectar asignaciones por Socket.IO WebSocket)
   // ==========================================================================
+  const OrigWebSocket = window.WebSocket;
+  if (typeof OrigWebSocket === 'function') {
+    window.WebSocket = function (url, protocols) {
+      const ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+      try {
+        if (String(url || '').includes('laraigo.com')) {
+          ws.addEventListener('message', (ev) => {
+            if (typeof ev.data === 'string') {
+              inspectSocketIoTextPayload(ev.data);
+            }
+          });
+        }
+      } catch (e) {}
+      return ws;
+    };
+    window.WebSocket.prototype = OrigWebSocket.prototype;
+    Object.assign(window.WebSocket, OrigWebSocket);
+  }
+
+  // ==========================================================================
+  // 4. PETICIONES POST A LA API DE LARAIGO (SIN PROBLEMAS DE CORS)
+  // ==========================================================================
+  async function apiPostJson(endpointPath, payloadObj) {
+    tryDiscoverTokenFromStorage();
+    if (!capturedBearerToken) {
+      return { ok: false, status: 0, data: null, reason: 'NO_BEARER_TOKEN' };
+    }
+
+    const fullUrl = endpointPath.startsWith('http') ? endpointPath : `${apiOrigin}${endpointPath}`;
+    const bodyString = JSON.stringify(payloadObj);
+
+    // Usar origFetch SIN credentials:'include' (igual que Angular HttpClient con Bearer token)
+    try {
+      const res = await origFetch(fullUrl, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Authorization': capturedBearerToken
+        },
+        body: bodyString
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (e) {}
+      if (data) {
+        inspectIncomingJsonResponse(fullUrl, data);
+      }
+      return { ok: res.ok, status: res.status, data };
+    } catch (fetchErr) {
+      // Respaldo por XMLHttpRequest nativo si fetch fallara
+      return new Promise((resolve) => {
+        try {
+          const xhr = new XMLHttpRequest();
+          origOpen.call(xhr, 'POST', fullUrl, true);
+          origSetRequestHeader.call(xhr, 'Accept', 'application/json, text/plain, */*');
+          origSetRequestHeader.call(xhr, 'Content-Type', 'application/json');
+          origSetRequestHeader.call(xhr, 'Authorization', capturedBearerToken);
+          xhr.onload = function () {
+            let data = null;
+            try {
+              data = JSON.parse(xhr.responseText || 'null');
+            } catch (e) {}
+            if (data) inspectIncomingJsonResponse(fullUrl, data);
+            resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
+          };
+          xhr.onerror = function () {
+            resolve({ ok: false, status: 0, data: null });
+          };
+          origSend.call(xhr, bodyString);
+        } catch (e) {
+          resolve({ ok: false, status: 0, data: null });
+        }
+      });
+    }
+  }
+
+  async function pollAssignedTicketsInBackground() {
+    tryDiscoverTokenFromStorage();
+    if (!capturedBearerToken) return { ok: false };
+
+    let queryPayload = learnedAssignedTicketsTemplate;
+    let endpoint = learnedAssignedTicketsEndpoint || '/api/main';
+
+    if (!queryPayload) {
+      const uid = getUserIdFromToken();
+      if (!uid) return { ok: false };
+      queryPayload = {
+        method: 'UFN_CONVERSATION_SEL_TICKETSBYUSER',
+        key: `UFN_CONVERSATION_SEL_TICKETSBYUSER_${uid}`,
+        parameters: {
+          userid: Number(uid),
+          status: 'ASIGNADO'
+        }
+      };
+      endpoint = '/api/main';
+    }
+
+    return apiPostJson(endpoint, queryPayload);
+  }
+
   async function fetchConversationDetailsInBackground(conversationid, personid) {
+    tryDiscoverTokenFromStorage();
     if (!capturedBearerToken || !conversationid) {
-      return { ok: false, reason: 'MISSING_TOKEN_OR_CONVID' };
+      return { ok: false, reason: 'MISSING_TOKEN_OR_CONVID', interactions: [], person: null };
     }
 
     const multiPayload = [];
@@ -265,7 +502,6 @@
           }
         }
         if (!replaced) {
-          q.parameters.p_conversationid = Number(conversationid);
           q.parameters.conversationid = Number(conversationid);
         }
       }
@@ -303,21 +539,10 @@
       }
     }
 
-    const res = await origFetch(`${apiOrigin}/api/multi`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'Authorization': capturedBearerToken
-      },
-      credentials: 'include',
-      body: JSON.stringify(multiPayload)
-    });
+    const res = await apiPostJson('/api/multi', multiPayload);
+    const resJson = res.data;
 
-    const resJson = await res.json();
-    inspectIncomingJsonResponse(`${apiOrigin}/api/multi`, resJson);
-
-    let interactions = [];
+    let interactions = cachedInteractionsMap.get(Number(conversationid)) || [];
     let person = null;
 
     if (resJson && Array.isArray(resJson.data)) {
@@ -340,14 +565,44 @@
     };
   }
 
+  // ==========================================================================
+  // 5. ESCUCHAR COMANDOS DESDE CONTENT.JS
+  // ==========================================================================
   window.addEventListener('message', async (event) => {
     if (event.source !== window || !event.data || event.data.source !== 'LARAIGO_CONTENT') return;
 
     const { action, requestId, payload } = event.data;
 
+    // Acción 0: Sincronización inicial apenas carga content.js
+    if (action === 'BRIDGE_HELLO') {
+      tryDiscoverTokenFromStorage();
+      if (cachedAssignedTicketsMap.size > 0) {
+        postToContentScript('ASSIGNED_TICKETS', {
+          key: 'UFN_CONVERSATION_SEL_TICKETSBYUSER_CACHE',
+          tickets: Array.from(cachedAssignedTicketsMap.values())
+        });
+      }
+      for (const [convId, rows] of cachedInteractionsMap.entries()) {
+        postToContentScript('INTERACTIONS', {
+          key: `UFN_CONVERSATION_SEL_INTERACTION_${convId}`,
+          conversationid: convId,
+          interactions: rows
+        });
+      }
+      for (const p of cachedPersonsMap.values()) {
+        postToContentScript('PERSON_CONTEXT', {
+          key: 'UFN_CONVERSATION_PERSON_SEL',
+          person: p
+        });
+      }
+      pollAssignedTicketsInBackground();
+      return;
+    }
+
     // Acción A: Enviar mensaje directo por API POST /api/ticket/reply
     if (action === 'SEND_API_REPLY') {
       try {
+        tryDiscoverTokenFromStorage();
         if (!capturedBearerToken) {
           postToContentScript('API_REPLY_RESULT', {
             requestId,
@@ -389,28 +644,14 @@
           }
         };
 
-        const res = await origFetch(`${apiOrigin}/api/ticket/reply`, {
-          method: 'POST',
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'Authorization': capturedBearerToken
-          },
-          credentials: 'include',
-          body: JSON.stringify(replyBody)
-        });
+        const res = await apiPostJson('/api/ticket/reply', replyBody);
+        const ok = res.ok && (!res.data || res.data.error !== true);
 
-        let resJson = null;
-        try {
-          resJson = await res.json();
-        } catch (e) {}
-
-        const ok = res.ok && (!resJson || resJson.error !== true);
         postToContentScript('API_REPLY_RESULT', {
           requestId,
           ok,
           status: res.status,
-          data: resJson
+          data: res.data
         });
       } catch (err) {
         postToContentScript('API_REPLY_RESULT', {
@@ -438,27 +679,8 @@
 
     // Acción C: Refrescar lista de tickets en Asignados en segundo plano
     if (action === 'POLL_ASSIGNED_TICKETS') {
-      try {
-        if (!capturedBearerToken || !learnedTicketsQueryTemplate) {
-          postToContentScript('POLL_ASSIGNED_RESULT', { requestId, ok: false });
-          return;
-        }
-        const res = await origFetch(`${apiOrigin}${learnedTicketsQueryEndpoint}`, {
-          method: 'POST',
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'Authorization': capturedBearerToken
-          },
-          credentials: 'include',
-          body: JSON.stringify(learnedTicketsQueryTemplate)
-        });
-        const resJson = await res.json();
-        inspectIncomingJsonResponse(`${apiOrigin}${learnedTicketsQueryEndpoint}`, resJson);
-        postToContentScript('POLL_ASSIGNED_RESULT', { requestId, ok: res.ok });
-      } catch (e) {
-        postToContentScript('POLL_ASSIGNED_RESULT', { requestId, ok: false });
-      }
+      const res = await pollAssignedTicketsInBackground();
+      postToContentScript('POLL_ASSIGNED_RESULT', { requestId, ok: Boolean(res && res.ok) });
     }
   });
 })();

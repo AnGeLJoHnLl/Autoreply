@@ -189,16 +189,19 @@
         if (!t || !t.ticketnum) continue;
         const tNum = String(t.ticketnum).trim();
         const cId = Number(t.conversationid);
+        const statusUpper = String(t.status || '').toUpperCase();
+        if (statusUpper && statusUpper !== 'ASIGNADO') continue;
+
         apiTicketsByTicketNum.set(tNum, t);
         if (cId) apiTicketsByConvId.set(cId, t);
 
-        // Notificación nativa de Windows (1 sola vez por Ticket) apenas cae en ASIGNADO
-        if (!isDisabledInThisTab && t.status === 'ASIGNADO' && !t.lastreplyuser) {
+        // Notificación nativa de Windows (1 sola vez por Ticket) apenas aparece en ASIGNADO (sin entrar al ticket)
+        if (!isDisabledInThisTab) {
           notifyNewTicketOnce(tNum, t.displayname || '');
         }
 
-        // Si el modo automático está activo, procesa el ticket 100% en 2° plano por API (sin cambiar de chat ni scrollear)
-        if (!isDisabledInThisTab && isScanningQueue && !isPausedForQuestion && t.status === 'ASIGNADO') {
+        // Atención automática 100% en 2° plano por API (sin entrar al ticket ni scrollear)
+        if (!isDisabledInThisTab && isScanningQueue && !isPausedForQuestion) {
           processTicketInBackgroundViaApi(t);
         }
       }
@@ -1869,9 +1872,25 @@
     const badge = document.getElementById('lc-scanner-status');
 
     try {
+      // Notificar en Windows al instante sin necesidad de entrar al ticket
       notifyNewTicketOnce(tNum, ticketMeta.displayname || '');
 
-      // 1. Consultar historial e información del ticket en 2° plano vía API (/api/multi)
+      // PASO 1 RAPIDÍSIMO (0ms): Si el ticket recién cayó (lastreplyuser === null),
+      // enviamos el saludo de inmediato sin esperar ninguna consulta previa
+      let greetedNow = false;
+      if (!ticketMeta.lastreplyuser && !apiGreetedTickets.has(tNum)) {
+        if (badge) {
+          badge.innerText = `⚡ [2° Plano] Ticket #${tNum}: Enviando 1° Saludo (0s)...`;
+        }
+        const sentFast = await sendMessageViaLaraigoApi(BASE_GREETING, ticketMeta, true);
+        if (sentFast) {
+          apiGreetedTickets.add(tNum);
+          greetedNow = true;
+          showToast(`⚡ Ticket #${tNum}: 1° Saludo enviado en 2° plano (esperando 5s...)`, "info");
+        }
+      }
+
+      // Consultar historial e información del ticket en 2° plano vía API (/api/multi)
       const initFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid);
 
       if (doesInteractionsListHaveSecondQuestion(initFetch.interactions)) {
@@ -1888,10 +1907,10 @@
         return false;
       }
 
-      // PASO 1 (0s): Enviar saludo inmediato por API sin cambiar de ticket ni tocar el chat abierto
+      // Si aún no se había enviado el saludo en el paso rápido, verificar en interacciones y enviarlo ahora
       const alreadyGreeted =
+        greetedNow ||
         apiGreetedTickets.has(tNum) ||
-        Boolean(ticketMeta.lastreplyuser) ||
         doesInteractionsListHaveGreeting(initFetch.interactions);
 
       if (!alreadyGreeted) {
@@ -2173,6 +2192,24 @@
         const detected = scanScreenForSubmotivo();
         const contextStats = await analyzeFullTicketContext(detected);
         updateDetectedPreview(detected, contextStats);
+
+        // Si el modo automático está activo y hay un ticket abierto sin responder aún,
+        // enviarlo automáticamente sin esperar a que el usuario haga clic en el botón
+        if (isScanningQueue && !isPausedForQuestion && detected && detected.rule && !detected.casuistica) {
+          const tNum = detected.ticketNum ? String(detected.ticketNum).trim() : null;
+          const alreadyInDom = doesCurrentChatAlreadyHaveSecondQuestion();
+          const alreadyInStorage = wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature).answered;
+          const inBgProgress = tNum ? backgroundTicketsInProgress.has(tNum) : false;
+
+          if (!alreadyInDom && !alreadyInStorage && !inBgProgress && !skippedTickets.has(detected.signature)) {
+            const openMeta = getActiveTicketMeta(tNum);
+            if (openMeta && openMeta.conversationid && openMeta.ticketnum) {
+              processTicketInBackgroundViaApi(openMeta);
+            } else {
+              safeSendTwoStepSmartReply(detected.rule, detected, true);
+            }
+          }
+        }
       }, 650);
     });
     manualObserver.observe(document.body, { childList: true, subtree: true });
@@ -2352,6 +2389,9 @@
 
     makeWidgetDraggable(container, dragHandle);
     renderSubmotivoButtons();
+
+    // Sincronizar de inmediato con page-bridge.js para recibir tickets ASIGNADO capturados al cargar
+    window.postMessage({ source: 'LARAIGO_CONTENT', action: 'BRIDGE_HELLO' }, '*');
 
     if (!isDisabledInThisTab) {
       startManualTicketMonitor();
