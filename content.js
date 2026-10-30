@@ -1,9 +1,16 @@
 // Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
-// Incluye:
-// - Auto-Scroll dentro del chat (sube al inicio para leer "Submotivo:" y baja al final para analizar fotos TOA y respuestas)
-// - Auto-Scroll y recorrido de tickets en la columna "Asignados(X)" de Laraigo
-// - Botón para Desactivar/Activar de forma independiente por pestaña ("🔌 Apagar aquí")
-// - 1° Saludo fijo ➔ 2° Análisis de Submotivo + Detector de Capturas de App TOA ("un momento")
+// Flujo completo inteligente por Submotivo + Analizador de Imágenes, Videos, Cintillos y Texto:
+// 1. Activaciones: Saludo -> Si hay captura App TOA (ignora fotos de equipo): "un momento" | Si no: "enviar error de toa"
+// 2. Reenvío de señal: Saludo -> Si hay captura App TOA (ignora fotos de equipo): "un momento" | Si no: "enviar captura de reenvio desde su toa"
+// 3. Registro de mesh: Saludo -> Si envía imagen: "Un momento" | Si no hay imagen: "Enviar imagen del repetidor"
+// 4. Consulta de cintillos: Saludo ->
+//    - Si envía números de cintillos (ej. 6273351...) y NO hay imagen: "Enviar captura de imagen de Fat/Tap"
+//    - Si hay solo imagen y NO hay números de cintillos: "Enviar cintillos"
+//    - Si NO envía ni imagen ni cintillos: "Enviar captura de imagen de Fat/Tap y cintillos"
+//    - Si envió ambos (imagen + cintillos): "Un momento"
+// 5. SOT de manto: Saludo -> Si hay video, imagen o texto explicando motivo: "Se revisa" | Si no hay nada: "Enviar motivo de sot de manto"
+// 6. Derivación a PEXT: Saludo -> Si se ven imágenes/videos: "Se revisa" | Si no hay nada: "Enviar evidencias porfavor"
+
 (function () {
   'use strict';
 
@@ -14,43 +21,37 @@
       id: "reenvio",
       name: "Reenvío de señal",
       keywords: ["reenvio"],
-      question: "enviar captura de reenvio desde su toa",
-      supportsAppScreenshotCheck: true
+      defaultQuestion: "enviar captura de reenvio desde su toa"
     },
     {
       id: "activaciones",
       name: "Activaciones",
       keywords: ["activacion", "activar"],
-      question: "enviar error de toa",
-      supportsAppScreenshotCheck: true
+      defaultQuestion: "enviar error de toa"
     },
     {
       id: "cintillos",
       name: "Consulta de Cintillos",
       keywords: ["cintillo", "fat", "tap"],
-      question: "enviar cintillos y foto del fat/tap",
-      supportsAppScreenshotCheck: false
+      defaultQuestion: "Enviar captura de imagen de Fat/Tap y cintillos"
     },
     {
       id: "mesh",
-      name: "Registro Mesh",
+      name: "Registro de Mesh",
       keywords: ["mesh", "repetidor"],
-      question: "enviar repetidor a activar",
-      supportsAppScreenshotCheck: false
+      defaultQuestion: "Enviar imagen del repetidor"
     },
     {
       id: "manto",
       name: "SOT de Manto",
       keywords: ["manto", "mantenimiento"],
-      question: "¿cuál es el motivo de la sot de manto?",
-      supportsAppScreenshotCheck: false
+      defaultQuestion: "Enviar motivo de sot de manto"
     },
     {
       id: "pext",
       name: "Derivación a PEXT",
       keywords: ["pext", "derivacion", "planta externa"],
-      question: "enviar evidencias y motivo de la derivacion",
-      supportsAppScreenshotCheck: false
+      defaultQuestion: "Enviar evidencias porfavor"
     }
   ];
 
@@ -129,7 +130,6 @@
 
   // ==============================================================
   // AUTO-SCROLL DENTRO DE LA CONVERSACIÓN DEL CHAT
-  // Sube al inicio para leer el "Submotivo:" y baja para cargar todas las fotos
   // ==============================================================
   function findChatMessagesScrollContainer() {
     const widget = document.getElementById('laraigo-copilot-container');
@@ -148,17 +148,15 @@
       if (div.clientHeight < 150 || div.clientWidth < 180) continue;
 
       const rect = div.getBoundingClientRect();
-      // El área central de chat en Laraigo está a la derecha de la lista de Asignados (left > 140)
       if (rect.left < 100) continue;
 
-      // Verificar si contiene burbujas de mensajes o texto de conversación
       const text = (div.innerText || '').toLowerCase();
       const hasChatIndicators =
         text.includes('mensaje entregado') ||
         text.includes('submotivo:') ||
         text.includes('hola, soy el') ||
         text.includes('hola técnico') ||
-        div.querySelectorAll('img').length > 0;
+        div.querySelectorAll('img, video').length > 0;
 
       if (hasChatIndicators && div.scrollHeight >= div.clientHeight) {
         const score = div.clientHeight * (div.scrollHeight > div.clientHeight ? 2 : 1);
@@ -172,37 +170,32 @@
     return bestCandidate;
   }
 
-  // Hace scroll arriba -> medio -> abajo en el chat abierto para capturar todo el historial e imágenes
   async function scrollChatAndCollectFullData() {
     const scrollContainer = findChatMessagesScrollContainer();
     let collectedText = '';
 
     if (scrollContainer && scrollContainer.scrollHeight > scrollContainer.clientHeight + 30) {
-      // 1. Subir al tope del chat donde está la plantilla inicial con "Submotivo:"
       scrollContainer.scrollTop = 0;
       await sleep(350);
       collectedText += '\n' + (scrollContainer.innerText || '');
 
-      // 2. Pasar por el medio para que carguen imágenes intermedias
       scrollContainer.scrollTop = Math.floor(scrollContainer.scrollHeight / 2);
       await sleep(250);
       collectedText += '\n' + (scrollContainer.innerText || '');
 
-      // 3. Bajar al final del chat para ver las últimas imágenes y mensajes enviados
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
       await sleep(350);
       collectedText += '\n' + (scrollContainer.innerText || '');
     }
 
-    const screenSubmotivo = scanScreenForSubmotivo(collectedText);
-    const imageStats = await analyzeAllTicketImages();
+    const detected = scanScreenForSubmotivo(collectedText);
+    const contextStats = await analyzeFullTicketContext(detected, collectedText);
 
-    return { detected: screenSubmotivo, imageStats };
+    return { detected, contextStats };
   }
 
   // ==============================================================
-  // ANALIZADOR VISUAL DE IMÁGENES DEL TICKET:
-  // Ignora fotos de equipos (ZTE/cajas) y detecta capturas de App celular (TOA)
+  // ANALIZADOR DE IMÁGENES, VIDEOS, NÚMEROS DE CINTILLOS Y TEXTO
   // ==============================================================
   function getChatAttachmentImages() {
     const widget = document.getElementById('laraigo-copilot-container');
@@ -212,11 +205,23 @@
       if (widget && widget.contains(img)) return false;
       if (img.offsetParent === null) return false;
       const rect = img.getBoundingClientRect();
-      if (rect.width < 100 || rect.height < 100) return false;
+      // Excluir avatares de usuario en panel derecho (perfil grande circular) o íconos pequeños
+      if (rect.width < 95 || rect.height < 95) return false;
       const src = (img.src || '').toLowerCase();
-      if (!src || src.includes('avatar') || src.includes('emoji') || src.includes('logo')) return false;
+      if (!src || src.includes('avatar') || src.includes('emoji') || src.includes('logo') || src.includes('profile')) return false;
+      // Excluir imágenes que estén en el panel derecho de Información del contacto
+      const rightInfoPanel = img.closest('[class*="info"], [class*="profile"], [class*="contact-detail"]');
+      if (rightInfoPanel) return false;
       return true;
     });
+  }
+
+  function hasVideoInChat() {
+    const widget = document.getElementById('laraigo-copilot-container');
+    const videos = Array.from(document.querySelectorAll('video, a[href*=".mp4"], a[href*=".mov"], [class*="video-player"], [class*="video_message"]')).filter(
+      el => (!widget || !widget.contains(el)) && el.offsetParent !== null
+    );
+    return videos.length > 0;
   }
 
   function analyzePixelsFromImageSource(imgSource) {
@@ -331,12 +336,70 @@
     });
   }
 
-  async function analyzeAllTicketImages() {
-    const imgs = getChatAttachmentImages();
-    if (imgs.length === 0) {
-      return { totalImages: 0, appScreenshots: 0, equipmentPhotos: 0, hasAppScreenshot: false };
-    }
+  // Analiza los mensajes adicionales del técnico (números de cintillos, explicaciones de SOT de manto, etc.)
+  function analyzeTechnicianExtraText(detected, extraCollectedText = '') {
+    const widget = document.getElementById('laraigo-copilot-container');
+    const scrollContainer = findChatMessagesScrollContainer();
+    const rawChatText = (extraCollectedText || '') + '\n' + (scrollContainer ? scrollContainer.innerText : document.body.innerText || '');
 
+    // Limpiar el texto de bloques del sistema, plantilla inicial y mensajes del asesor
+    let cleaned = rawChatText
+      // Quitar el bloque de plantilla de ingreso "Hola, soy el técnico ... Submotivo: <linea>"
+      .replace(/Hola,\s*soy\s*el\s*t[eé]cnico[\s\S]*?Submotivo\s*:\s*[^\r\n]+/gi, ' ')
+      // Quitar mensajes automáticos del sistema Laraigo
+      .replace(/Te estamos contactando con un asesor especializado[^\r\n]*/gi, ' ')
+      .replace(/ASIGNADO A HOLDING[^\r\n]*/gi, ' ')
+      .replace(/REASIGNADO DE HOLDING[^\r\n]*/gi, ' ')
+      .replace(/MENSAJE ENTREGADO[^\r\n]*/gi, ' ')
+      .replace(/Esta conversaci[oó]n se encuentra bloqueada[^\r\n]*/gi, ' ')
+      // Quitar mensajes nuestros como asesor
+      .replace(/Hola T[eé]cnico,\s*Procederemos con la atenci[oó]n\.?/gi, ' ')
+      .replace(/enviar error de toa/gi, ' ')
+      .replace(/enviar captura de reenvio desde su toa/gi, ' ')
+      .replace(/enviar captura de imagen de fat\/tap y cintillos/gi, ' ')
+      .replace(/enviar captura de imagen de fat\/tap/gi, ' ')
+      .replace(/enviar cintillos/gi, ' ')
+      .replace(/enviar imagen del repetidor/gi, ' ')
+      .replace(/enviar motivo de sot de manto/gi, ' ')
+      .replace(/enviar evidencias porfavor/gi, ' ')
+      // Quitar horas tipo "10:23" o "14:32"
+      .replace(/\b\d{1,2}:\d{2}\b/g, ' ');
+
+    const sotStr = detected?.sot ? String(detected.sot) : '';
+    const ticketStr = detected?.ticketNum ? String(detected.ticketNum) : '';
+
+    // 1. Detectar números de cintillos (ej. 6273351, 8041438, 6776329...)
+    // Los cintillos suelen ser números de 6 a 8 dígitos (excluyendo SOT, N° de Ticket y celulares de 9 dígitos que empiezan con 9)
+    const numberMatches = cleaned.match(/\b\d{6,9}\b/g) || [];
+    const cintilloNumbers = numberMatches.filter(num => {
+      if (num === sotStr || num === ticketStr) return false;
+      // Excluir celulares peruanos de 9 dígitos que empiezan en 9 (ej. 924356406)
+      if (num.length === 9 && num.startsWith('9')) return false;
+      return true;
+    });
+
+    const hasCintillosNumbers = cintilloNumbers.length >= 1;
+
+    // 2. Detectar si el técnico escribió texto explicativo (para SOT de manto)
+    // Quitar números sueltos y saludos cortos genéricos ("hola", "buenas tardes", "buenos dias")
+    const textWithoutNumbers = cleaned
+      .replace(/\b\d+\b/g, ' ')
+      .replace(/\b(hola|buenas|tardes|dias|noches|buen|dia|por|favor|apoyo|gracias|estimado|asesor)\b/gi, ' ')
+      .replace(/[^\wáéíóúñÁÉÍÓÚÑ]+/g, ' ')
+      .trim();
+
+    // Si quedan palabras con sentido (al menos 6 letras en total), hay texto explicando el motivo
+    const hasExplanationText = textWithoutNumbers.length >= 6;
+
+    return {
+      hasCintillosNumbers,
+      cintilloCount: cintilloNumbers.length,
+      hasExplanationText
+    };
+  }
+
+  async function analyzeFullTicketContext(detected, extraCollectedText = '') {
+    const imgs = getChatAttachmentImages();
     let appScreenshots = 0;
     let equipmentPhotos = 0;
 
@@ -344,25 +407,144 @@
       const result = await classifySingleImageElement(img);
       if (result.type === 'app_screenshot') {
         appScreenshots++;
-      } else if (result.type === 'equipment_photo') {
+      } else {
         equipmentPhotos++;
       }
     }
 
+    const hasVideo = hasVideoInChat();
+    const extraTextStats = analyzeTechnicianExtraText(detected, extraCollectedText);
+
     return {
       totalImages: imgs.length,
+      hasAnyImage: imgs.length > 0,
       appScreenshots,
       equipmentPhotos,
-      hasAppScreenshot: appScreenshots > 0
+      hasAppScreenshot: appScreenshots > 0,
+      hasVideo,
+      hasCintillosNumbers: extraTextStats.hasCintillosNumbers,
+      cintilloCount: extraTextStats.cintilloCount,
+      hasExplanationText: extraTextStats.hasExplanationText
     };
   }
 
-  function resolveSecondMessage(rule, imageStats) {
+  // ==============================================================
+  // REGLAS DE DECISIÓN DEL 2° MENSAJE SEGÚN SUBMOTIVO Y EVIDENCIAS
+  // ==============================================================
+  function resolveSecondMessage(rule, stats) {
     if (!rule) return null;
-    if (rule.supportsAppScreenshotCheck && imageStats && imageStats.hasAppScreenshot) {
-      return "un momento";
+    if (!stats) return rule.defaultQuestion;
+
+    switch (rule.id) {
+      // 1. ACTIVACIONES: Ignorar fotos de equipo; si hay captura de App de celular (TOA) -> "un momento", sino -> "enviar error de toa"
+      case "activaciones":
+        if (stats.hasAppScreenshot) {
+          return "un momento";
+        }
+        return "enviar error de toa";
+
+      // 2. REENVÍO DE SEÑAL: Ignorar fotos de equipo; si hay captura de App de celular (TOA) -> "un momento", sino -> "enviar captura de reenvio desde su toa"
+      case "reenvio":
+        if (stats.hasAppScreenshot) {
+          return "un momento";
+        }
+        return "enviar captura de reenvio desde su toa";
+
+      // 3. REGISTRO DE MESH: Si envía imagen -> "Un momento", si no hay imagen -> "Enviar imagen del repetidor"
+      case "mesh":
+        if (stats.hasAnyImage) {
+          return "Un momento";
+        }
+        return "Enviar imagen del repetidor";
+
+      // 4. CONSULTA DE CINTILLOS:
+      // - Si envía números de cintillos y NO hay imagen -> "Enviar captura de imagen de Fat/Tap"
+      // - Si hay solo imagen y NO hay números de cintillos -> "Enviar cintillos"
+      // - Si NO envía nada -> "Enviar captura de imagen de Fat/Tap y cintillos"
+      // - Si ya envió ambos (imagen + cintillos) -> "Un momento"
+      case "cintillos":
+        if (stats.hasCintillosNumbers && !stats.hasAnyImage) {
+          return "Enviar captura de imagen de Fat/Tap";
+        }
+        if (!stats.hasCintillosNumbers && stats.hasAnyImage) {
+          return "Enviar cintillos";
+        }
+        if (stats.hasCintillosNumbers && stats.hasAnyImage) {
+          return "Un momento";
+        }
+        return "Enviar captura de imagen de Fat/Tap y cintillos";
+
+      // 5. SOT DE MANTO:
+      // - Si hay algún video, imagen o texto explicando -> "Se revisa"
+      // - Si no hay ningún video, imagen ni texto explicando -> "Enviar motivo de sot de manto"
+      case "manto":
+        if (stats.hasVideo || stats.hasAnyImage || stats.hasExplanationText) {
+          return "Se revisa";
+        }
+        return "Enviar motivo de sot de manto";
+
+      // 6. DERIVACIÓN A PEXT:
+      // - Si se ven imágenes (o video) -> "Se revisa"
+      // - Si no hay nada -> "Enviar evidencias porfavor"
+      case "pext":
+        if (stats.hasAnyImage || stats.hasVideo) {
+          return "Se revisa";
+        }
+        return "Enviar evidencias porfavor";
+
+      default:
+        return rule.defaultQuestion;
     }
-    return rule.question;
+  }
+
+  // Descripción amigable en el widget de lo que se detectó en el ticket
+  function buildContextSummaryHtml(rule, stats) {
+    if (!rule || !stats) return '';
+
+    switch (rule.id) {
+      case "activaciones":
+      case "reenvio":
+        if (stats.hasAppScreenshot) {
+          return `<div class="lc-ctx-note ok">📱 Captura App TOA detectada${stats.equipmentPhotos > 0 ? ` (${stats.equipmentPhotos} foto de equipo ignorada)` : ''} ➔ <b>"un momento"</b></div>`;
+        }
+        if (stats.equipmentPhotos > 0) {
+          return `<div class="lc-ctx-note warn">📷 Solo foto de equipo (${stats.equipmentPhotos}) sin captura App TOA ➔ Pedirá captura</div>`;
+        }
+        return `<div class="lc-ctx-note info">🖼️ Sin captura de App TOA ➔ Pedirá captura</div>`;
+
+      case "mesh":
+        if (stats.hasAnyImage) {
+          return `<div class="lc-ctx-note ok">📷 Imagen de repetidor detectada (${stats.totalImages}) ➔ <b>"Un momento"</b></div>`;
+        }
+        return `<div class="lc-ctx-note info">🖼️ Sin imagen de repetidor ➔ <b>"Enviar imagen del repetidor"</b></div>`;
+
+      case "cintillos":
+        if (stats.hasCintillosNumbers && !stats.hasAnyImage) {
+          return `<div class="lc-ctx-note warn">🔢 Cintillos detectados (${stats.cintilloCount} núm.) pero falta foto ➔ <b>"Enviar captura de imagen de Fat/Tap"</b></div>`;
+        }
+        if (!stats.hasCintillosNumbers && stats.hasAnyImage) {
+          return `<div class="lc-ctx-note warn">📷 Foto detectada pero faltan números ➔ <b>"Enviar cintillos"</b></div>`;
+        }
+        if (stats.hasCintillosNumbers && stats.hasAnyImage) {
+          return `<div class="lc-ctx-note ok">✅ Foto + Cintillos (${stats.cintilloCount}) completos ➔ <b>"Un momento"</b></div>`;
+        }
+        return `<div class="lc-ctx-note info">⚠️ Sin foto ni cintillos ➔ <b>"Enviar captura de imagen de Fat/Tap y cintillos"</b></div>`;
+
+      case "manto":
+        if (stats.hasVideo || stats.hasAnyImage || stats.hasExplanationText) {
+          return `<div class="lc-ctx-note ok">✅ Evidencia/motivo detectado en chat ➔ <b>"Se revisa"</b></div>`;
+        }
+        return `<div class="lc-ctx-note info">⚠️ Sin video, imagen ni explicación ➔ <b>"Enviar motivo de sot de manto"</b></div>`;
+
+      case "pext":
+        if (stats.hasAnyImage || stats.hasVideo) {
+          return `<div class="lc-ctx-note ok">📷 Imágenes de evidencia detectadas (${stats.totalImages}) ➔ <b>"Se revisa"</b></div>`;
+        }
+        return `<div class="lc-ctx-note info">⚠️ Sin imágenes de evidencia ➔ <b>"Enviar evidencias porfavor"</b></div>`;
+
+      default:
+        return '';
+    }
   }
 
   // ==============================================================
@@ -558,7 +740,9 @@
   }
 
   // ==============================================================
-  // ENVÍO INTELIGENTE EN 2 PASOS
+  // ENVÍO INTELIGENTE EN 2 PASOS:
+  // 1° Saludo ("Hola Técnico, Procederemos con la atención")
+  // 2° Respuesta dinámica según evaluación del ticket
   // ==============================================================
   async function safeSendTwoStepSmartReply(ruleOrQuestion, detectedContext = null, force = false, onComplete = null) {
     if (isDisabledInThisTab) return false;
@@ -590,7 +774,7 @@
     if (!force) {
       if (doesCurrentChatAlreadyHaveSecondQuestion()) {
         askAgentConfirmation(
-          `⚠️ Este chat ya tiene la respuesta completa enviada en pantalla. ¿Seguro que deseas volver a enviar?`,
+          `⚠️ Este chat ya tiene la respuesta enviada en pantalla. ¿Seguro que deseas volver a enviar?`,
           () => safeSendTwoStepSmartReply(ruleOrQuestion, detected, true, onComplete)
         );
         return false;
@@ -610,10 +794,10 @@
     markTicketAsAnswered(sot, ticketNum, sig);
 
     const greetingAlreadyPresent = doesCurrentChatAlreadyHaveGreeting();
-    const imageStats = await analyzeAllTicketImages();
+    const contextStats = await analyzeFullTicketContext(detected);
     const secondMessageText = typeof ruleOrQuestion === 'string'
       ? ruleOrQuestion
-      : resolveSecondMessage(ruleOrQuestion, imageStats);
+      : resolveSecondMessage(ruleOrQuestion, contextStats);
 
     if (greetingAlreadyPresent && !force) {
       showToast(`Saludo ya presente ➔ Enviando: "${secondMessageText}"`, "info");
@@ -636,12 +820,7 @@
       }
 
       setTimeout(() => {
-        if (imageStats.hasAppScreenshot && typeof ruleOrQuestion === 'object' && ruleOrQuestion.supportsAppScreenshotCheck) {
-          showToast(`📱 Captura TOA detectada ➔ Enviando: "un momento"`, "info");
-        } else {
-          showToast(`2/2 Enviando: "${secondMessageText}"`, "info");
-        }
-
+        showToast(`2/2 Enviando: "${secondMessageText}"`, "info");
         pasteAndSendSingleMessage(secondMessageText, () => {
           showToast(`✅ Atención enviada${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
           setTimeout(() => {
@@ -765,7 +944,7 @@
   }
 
   // ==========================================
-  // COMPROBAR SI EL CHAT YA TIENE SALUDO O PREGUNTA
+  // COMPROBAR SI EL CHAT YA TIENE SALUDO O 2° RESPUESTA
   // ==========================================
   function doesCurrentChatAlreadyHaveGreeting() {
     const widget = document.getElementById('laraigo-copilot-container');
@@ -792,14 +971,19 @@
     const secondStepPhrases = [
       "enviar error de toa",
       "enviar captura de reenvio desde su toa",
-      "enviar cintillos y foto del fat/tap",
+      "enviar captura de imagen de fat/tap y cintillos",
+      "enviar captura de imagen de fat/tap",
+      "enviar cintillos",
+      "enviar imagen del repetidor",
+      "enviar motivo de sot de manto",
+      "enviar evidencias porfavor",
       "enviar repetidor a activar",
       "cual es el motivo de la sot de manto",
       "enviar evidencias y motivo de la derivacion"
     ];
 
     let hasGreeting = false;
-    let hasUnMomento = false;
+    let hasShortClosingReply = false;
 
     for (const msg of chatContainers) {
       if (widget && widget.contains(msg)) continue;
@@ -810,12 +994,19 @@
       if (text.includes("hola tecnico, procederemos con la atencion")) {
         hasGreeting = true;
       }
-      if (text === "un momento" || text.startsWith("un momento\n") || text.includes("\nun momento")) {
-        hasUnMomento = true;
+      if (
+        text === "un momento" ||
+        text.startsWith("un momento\n") ||
+        text.includes("\nun momento") ||
+        text === "se revisa" ||
+        text.startsWith("se revisa\n") ||
+        text.includes("\nse revisa")
+      ) {
+        hasShortClosingReply = true;
       }
     }
 
-    return hasGreeting && hasUnMomento;
+    return hasGreeting && hasShortClosingReply;
   }
 
   // ==========================================
@@ -857,7 +1048,6 @@
   function getInboxTicketElements() {
     const widget = document.getElementById('laraigo-copilot-container');
 
-    // 1. Buscar la pestaña "Asignados(X)" en la esquina superior izquierda de Laraigo
     const allElements = Array.from(document.querySelectorAll('div, span, a, button, li'));
     let asignadosTabEl = null;
     for (const el of allElements) {
@@ -869,10 +1059,8 @@
       }
     }
 
-    // Si encontramos la columna de "Asignados(X)", buscar las tarjetas de tickets justo debajo de esa barra
     if (asignadosTabEl) {
       const tabRect = asignadosTabEl.getBoundingClientRect();
-      // Subir hasta encontrar el contenedor de toda la columna izquierda (alto > 250px)
       let leftColumn = asignadosTabEl.parentElement;
       for (let i = 0; i < 6; i++) {
         if (!leftColumn || leftColumn === document.body) break;
@@ -881,7 +1069,6 @@
       }
 
       if (leftColumn) {
-        // Hacer scroll en la lista izquierda si tiene barra de desplazamiento
         const scrollableList = Array.from(leftColumn.querySelectorAll('div')).find(
           d => d.scrollHeight > d.clientHeight + 20 && d.clientHeight > 150
         );
@@ -889,13 +1076,10 @@
           scrollableList.scrollTop = 0;
         }
 
-        // Buscar cada tarjeta de ticket ubicada debajo de la pestaña "Asignados"
         const candidateCards = Array.from(leftColumn.querySelectorAll('div, li, a')).filter(el => {
           if (widget && widget.contains(el)) return false;
           if (el.offsetParent === null) return false;
           const r = el.getBoundingClientRect();
-          // Debe estar debajo de la barra "Asignados" (r.top > tabRect.bottom - 5)
-          // y en la columna izquierda (r.left < 220, ancho entre 110 y 340, alto de tarjeta entre 48 y 140)
           if (r.top < tabRect.bottom - 2) return false;
           if (r.left > 180) return false;
           if (r.width < 110 || r.width > 340) return false;
@@ -906,7 +1090,6 @@
           return true;
         });
 
-        // Filtrar contenedores padres duplicados (quedarnos con las tarjetas fila de nivel superior)
         const uniqueRowCards = candidateCards.filter(card => {
           return !candidateCards.some(other => other !== card && other.contains(card));
         });
@@ -917,7 +1100,6 @@
       }
     }
 
-    // 2. Fallback por selectores clásicos
     const candidateSelectors = [
       'div[class*="conversation-item"]',
       'div[class*="chat-item"]',
@@ -973,8 +1155,8 @@
     if (isScanningQueue) {
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "Recorriendo Asignados y scrolleando chats...";
-      showToast("🔍 Auto-Scroll de chats iniciado", "info");
+      badge.innerText = "Recorriendo Asignados y evaluando flujos...";
+      showToast("🔍 Auto-Scroll inteligente iniciado", "info");
       currentTicketIndex = 0;
       runNextScannerStep();
     } else {
@@ -1029,9 +1211,9 @@
       return;
     }
 
-    badge.innerText = `↕️ Scrolleando el chat para leer Submotivo y fotos...`;
-    const { detected, imageStats } = await scrollChatAndCollectFullData();
-    updateDetectedPreview(detected, imageStats);
+    badge.innerText = `↕️ Scrolleando chat para evaluar Submotivo y evidencias...`;
+    const { detected, contextStats } = await scrollChatAndCollectFullData();
+    updateDetectedPreview(detected, contextStats);
 
     if (doesCurrentChatAlreadyHaveSecondQuestion()) {
       if (detected) markTicketAsAnswered(detected.sot, detected.ticketNum, detected.signature);
@@ -1076,12 +1258,12 @@
       return;
     }
 
-    const secondMsg = resolveSecondMessage(detected.rule, imageStats);
+    const secondMsg = resolveSecondMessage(detected.rule, contextStats);
     badge.innerText = `🎯 SOT ${detected.sot || ''} ➔ Enviando "${secondMsg}"...`;
     safeSendTwoStepSmartReply(detected.rule, detected, true, () => onDone());
   }
 
-  function updateDetectedPreview(detected, imageStats = null) {
+  function updateDetectedPreview(detected, contextStats = null) {
     if (isDisabledInThisTab) return;
     const previewEl = document.getElementById('lc-live-detected');
     if (!previewEl) return;
@@ -1124,23 +1306,13 @@
 
     if (detected && detected.rule) {
       const sotBadge = detected.sot ? ` | <b>SOT: ${detected.sot}</b>` : '';
-      const secondMsg = resolveSecondMessage(detected.rule, imageStats);
-
-      let imgSummaryHtml = '';
-      if (detected.rule.supportsAppScreenshotCheck && imageStats) {
-        if (imageStats.hasAppScreenshot) {
-          imgSummaryHtml = `<div style="margin-top:4px; color:#047857; font-size:11px;">📱 <b>Captura de App (TOA) detectada</b>${imageStats.equipmentPhotos > 0 ? ` (${imageStats.equipmentPhotos} foto de equipo ignorada)` : ''} ➔ Dirá <b>"un momento"</b></div>`;
-        } else if (imageStats.equipmentPhotos > 0) {
-          imgSummaryHtml = `<div style="margin-top:4px; color:#b45309; font-size:11px;">📷 Solo foto de equipo (${imageStats.equipmentPhotos}) sin captura TOA ➔ Pedirá captura</div>`;
-        } else {
-          imgSummaryHtml = `<div style="margin-top:4px; color:#64748b; font-size:11px;">🖼️ Sin captura de App TOA ➔ Pedirá captura</div>`;
-        }
-      }
+      const secondMsg = resolveSecondMessage(detected.rule, contextStats);
+      const contextSummaryHtml = buildContextSummaryHtml(detected.rule, contextStats);
 
       previewEl.innerHTML = `
         <div class="lc-detected-box found">
           <div>🎯 Leído: <b>Submotivo: ${detected.rawSubmotivo}</b>${sotBadge}</div>
-          ${imgSummaryHtml}
+          ${contextSummaryHtml}
           <button id="lc-quick-send-detected" class="lc-quick-send-btn">
             🚀 Enviar: 1° Saludo ➔ 2° "${secondMsg}"
           </button>
@@ -1156,7 +1328,7 @@
     } else {
       previewEl.innerHTML = `
         <div class="lc-detected-box waiting">
-          🔍 Abre un chat para analizar <code>Submotivo:</code> e imágenes TOA
+          🔍 Abre un chat para analizar <code>Submotivo:</code>, fotos y cintillos
         </div>
       `;
     }
@@ -1173,8 +1345,8 @@
       debounceTimer = setTimeout(async () => {
         if (isDisabledInThisTab) return;
         const detected = scanScreenForSubmotivo();
-        const imageStats = await analyzeAllTicketImages();
-        updateDetectedPreview(detected, imageStats);
+        const contextStats = await analyzeFullTicketContext(detected);
+        updateDetectedPreview(detected, contextStats);
       }, 600);
     });
     manualObserver.observe(document.body, { childList: true, subtree: true });
@@ -1265,7 +1437,7 @@
     container.innerHTML = `
       <div class="lc-header" id="lc-drag-handle" title="Arrastra desde aquí para mover el panel">
         <div class="lc-title">
-          <span class="lc-badge">CLARO</span> Copiloto TOA
+          <span class="lc-badge">CLARO</span> Copiloto Inteligente
         </div>
         <div class="lc-actions">
           <button id="lc-btn-disable-tab" class="lc-btn-disable-tab" title="Apagar el Copiloto solo en esta pestaña/ventana">
@@ -1285,10 +1457,10 @@
           </div>
         </div>
 
-        <!-- Detector en tiempo real del mensaje e imágenes abiertas -->
+        <!-- Detector en tiempo real del mensaje, imágenes y cintillos -->
         <div id="lc-live-detected">
           <div class="lc-detected-box waiting">
-            🔍 Abre un chat para analizar <code>Submotivo:</code> e imágenes TOA
+            🔍 Abre un chat para analizar <code>Submotivo:</code>, fotos y cintillos
           </div>
         </div>
 
@@ -1298,11 +1470,11 @@
             ▶️ Auto-Escanear y Scrollear Chats
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            Recorre "Asignados", sube/baja el scroll del chat y responde
+            Evalúa fotos TOA, repetidor, cintillos, videos y motivos
           </div>
         </div>
 
-        <div class="lc-section-title">⚡ Submotivos Manuales (1° Saludo + 2° Auto/Pregunta)</div>
+        <div class="lc-section-title">⚡ Submotivos Manuales (Evalúan el chat al clic)</div>
         <div class="lc-submotivos-grid" id="lc-submotivos-list"></div>
       </div>
     `;
@@ -1339,18 +1511,26 @@
     if (!list) return;
     list.innerHTML = '';
 
+    const previews = {
+      reenvio: 'Sin captura TOA: "enviar captura..." | Con captura: "un momento"',
+      activaciones: 'Sin captura TOA: "enviar error..." | Con captura: "un momento"',
+      cintillos: 'Verifica foto Fat/Tap y núm. cintillos (pide lo que falte)',
+      mesh: 'Con foto: "Un momento" | Sin foto: "Enviar imagen del repetidor"',
+      manto: 'Con video/foto/texto: "Se revisa" | Vacío: "Enviar motivo..."',
+      pext: 'Con fotos: "Se revisa" | Sin fotos: "Enviar evidencias porfavor"'
+    };
+
     SUBMOTIVO_MAP.forEach((item) => {
       const btn = document.createElement('button');
       btn.className = 'lc-submotivo-btn';
       btn.dataset.id = item.id;
-      const note = item.supportsAppScreenshotCheck ? ' (o "un momento" si hay captura TOA)' : '';
-      btn.title = `1° ${BASE_GREETING}\n2° ${item.question}${note}`;
+      btn.title = previews[item.id] || item.defaultQuestion;
 
       btn.innerHTML = `
         <div class="lc-btn-top">
           <b>${item.name}</b>
         </div>
-        <div class="lc-btn-preview">2° "${item.question}"${item.supportsAppScreenshotCheck ? ' / "un momento"' : ''}</div>
+        <div class="lc-btn-preview">${previews[item.id]}</div>
       `;
 
       btn.addEventListener('click', () => {
