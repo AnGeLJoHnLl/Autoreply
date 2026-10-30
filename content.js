@@ -1,9 +1,9 @@
-// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro (Versión Auditada v1.3)
-// Flujo de Tiempo Exacto:
-//   0° AUTO-APERTURA DE TICKET: Detecta al instante cuando cae un ticket en "Asignados(1..N)" y le da clic real para abrirlo sin intervención humana
-//   1° INMEDIATO (0s): Envía el saludo "Hola Técnico, Procederemos con la atención"
-//   2° ESPERA DE 5 SEGUNDOS: Da 5s para que terminen de caer fotos, cintillos o textos del técnico
-//   3° EVALUACIÓN PROFUNDA DEL CHAT + AUTO-SCROLL: Analiza Submotivo + Evidencias reales del chat central y envía el 2° mensaje
+// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro (Versión Auditada v1.4)
+// Mejoras clave de fiabilidad de envío:
+//   1. Espera inteligente de carga del chat (waitForTicketContentToLoad + waitForChatInput) tras abrir un ticket
+//   2. Envío verificado con reintentos automáticos (pasteAndSendWithRetry): comprueba que la caja de texto quede vacía;
+//      si el texto sigue en la caja, reintenta hasta 4 veces combinando Enter, eventos Angular/React y clic en el botón Enviar
+//   3. Saludo inmediato (0s) ➔ Espera de 5s para recibir fotos/cintillos/textos ➔ 2° Respuesta inteligente
 
 (function () {
   'use strict';
@@ -139,7 +139,6 @@
     return false;
   }
 
-  // Encuentra la pestaña "Asignados(N)" y devuelve su elemento, el conteo N y las coordenadas de la columna izquierda
   function getAsignadosColumnInfo() {
     const allEls = Array.from(document.querySelectorAll('div, span, a, button, li'));
     let asignadosEl = null;
@@ -163,7 +162,6 @@
 
     const tabRect = asignadosEl.getBoundingClientRect();
 
-    // Buscar la barra contenedora de las pestañas (Asignados | Pausados | Cerrados) para saber el ancho exacto de la columna izquierda
     let tabBar = asignadosEl.parentElement;
     let colLeft = Math.max(30, tabRect.left - 15);
     let colRight = Math.max(tabRect.right + 140, 240);
@@ -184,7 +182,6 @@
       tabBar = tabBar.parentElement;
     }
 
-    // Buscar el contenedor vertical completo de la columna izquierda
     let leftColumnContainer = asignadosEl.parentElement;
     for (let i = 0; i < 7; i++) {
       if (!leftColumnContainer || leftColumnContainer === document.body) break;
@@ -304,6 +301,19 @@
     const contextStats = await analyzeFullTicketContext(detected, collectedText);
 
     return { detected, contextStats };
+  }
+
+  // Esperar hasta 3.5 segundos a que carguen los mensajes y la caja de texto cuando recién se abre un ticket
+  async function waitForTicketContentToLoad(maxWaitMs = 3500) {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      if (isConversationBlockedByHSM()) return true;
+      const hasSubmotivo = !!scanScreenForSubmotivo();
+      const hasInput = !!findChatInput();
+      if (hasSubmotivo && hasInput) return true;
+      await sleep(250);
+    }
+    return false;
   }
 
   // ==============================================================
@@ -670,14 +680,13 @@
   }
 
   // ==============================================================
-  // LOCALIZAR CAJA DE TEXTO Y ENVIAR MENSAJE EN LARAIGO
+  // LOCALIZAR CAJA DE TEXTO Y ENVIAR MENSAJE CON REINTENTOS VERIFICADOS
   // ==============================================================
   function isConversationBlockedByHSM() {
     const bodyText = normalizeText(document.body.innerText || '');
     return bodyText.includes("esta conversacion se encuentra bloqueada hasta que el cliente responda");
   }
 
-  // Verifica si actualmente hay algún ticket abierto en el panel central
   function isAnyTicketCurrentlyOpenInCenter() {
     if (getCurrentLaraigoTicketNumber()) return true;
     if (findChatInput()) return true;
@@ -707,7 +716,24 @@
       if (isElementInOurOverlay(inp)) continue;
       if (inp.offsetParent === null || inp.disabled || inp.readOnly) continue;
       const placeholder = (inp.placeholder || '').toLowerCase();
-      if (placeholder.includes('mensaje') || placeholder.includes('escribe') || placeholder.includes('chat') || placeholder.includes('responder')) {
+      if (
+        placeholder.includes('mensaje') ||
+        placeholder.includes('escribe') ||
+        placeholder.includes('chat') ||
+        placeholder.includes('responder') ||
+        placeholder.includes('texto')
+      ) {
+        return { element: inp, type: 'input' };
+      }
+    }
+
+    // Fallback: cualquier input de texto visible en la parte inferior central del chat
+    const { minLeft, maxRight } = getChatColumnBounds();
+    for (const inp of inputs) {
+      if (isElementInOurOverlay(inp)) continue;
+      if (inp.offsetParent === null || inp.disabled || inp.readOnly) continue;
+      const r = inp.getBoundingClientRect();
+      if (r.left >= minLeft - 20 && r.right <= maxRight + 20 && r.top > window.innerHeight * 0.65) {
         return { element: inp, type: 'input' };
       }
     }
@@ -715,14 +741,26 @@
     return null;
   }
 
+  // Espera hasta 3 segundos a que la caja de texto esté lista y habilitada
+  async function waitForChatInputReady(maxWaitMs = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      if (isConversationBlockedByHSM()) return null;
+      const target = findChatInput();
+      if (target && target.element) return target;
+      await sleep(150);
+    }
+    return findChatInput();
+  }
+
   function findSendButtonNearInput(inputElement) {
     if (!inputElement) return null;
 
     let footerContainer = inputElement.parentElement;
-    for (let level = 0; level < 4; level++) {
+    for (let level = 0; level < 5; level++) {
       if (!footerContainer || footerContainer === document.body) break;
       const candidates = Array.from(
-        footerContainer.querySelectorAll('button, [role="button"], a, i[class*="send"], i[class*="paper-plane"], span[class*="send"], mat-icon')
+        footerContainer.querySelectorAll('button, [role="button"], a, i[class*="send"], i[class*="paper-plane"], span[class*="send"], mat-icon, svg')
       ).filter(el => {
         if (isElementInOurOverlay(el)) return false;
         if (el.offsetParent === null || el.disabled) return false;
@@ -731,6 +769,7 @@
 
       for (const el of candidates) {
         const clickable = el.closest('button, [role="button"], a') || el;
+        if (clickable.disabled) continue;
         const descriptor = (
           (clickable.getAttribute('aria-label') || '') + ' ' +
           (clickable.getAttribute('title') || '') + ' ' +
@@ -752,14 +791,14 @@
         }
       }
 
-      const buttonsInRow = Array.from(footerContainer.querySelectorAll('button, [role="button"]')).filter(
+      const buttonsInRow = Array.from(footerContainer.querySelectorAll('button, [role="button"], a')).filter(
         b => !isElementInOurOverlay(b) && b.offsetParent !== null && !b.disabled
       );
       if (buttonsInRow.length > 0) {
         const inputRect = inputElement.getBoundingClientRect();
         const rightButtons = buttonsInRow.filter(b => {
           const rect = b.getBoundingClientRect();
-          return rect.left >= inputRect.right - 60 && Math.abs(rect.top - inputRect.top) < 100;
+          return rect.left >= inputRect.right - 70 && Math.abs(rect.top - inputRect.top) < 110;
         });
         if (rightButtons.length > 0) {
           return rightButtons[rightButtons.length - 1];
@@ -772,27 +811,37 @@
     return null;
   }
 
+  // Escribir texto en la caja de Laraigo activando todos los listeners de Angular / React / Vue
   function setInputValue(target, text) {
     if (!target || !target.element) return false;
     const { element, type } = target;
 
+    // 1. Hacer clic y enfocar la caja de texto primero
+    simulateRealClick(element);
     element.focus();
 
     if (type === 'textarea' || type === 'input') {
       const proto = type === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
       const valueSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+
       if (valueSetter) {
         valueSetter.call(element, text);
       } else {
         element.value = text;
       }
+
+      element.dispatchEvent(new Event('focus', { bubbles: true }));
+      element.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
       element.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
+      // Disparar keyup de una letra normal para que Angular habilite el botón Enviar si depende de (keyup)
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', code: 'KeyA', keyCode: 65, bubbles: true }));
     } else if (type === 'contenteditable') {
       element.focus();
       document.execCommand('selectAll', false, null);
       document.execCommand('insertText', false, text);
       element.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', code: 'KeyA', keyCode: 65, bubbles: true }));
     }
 
     return true;
@@ -806,7 +855,6 @@
     return (target.element.innerText || '').trim();
   }
 
-  // Simular secuencia completa de eventos de puntero y ratón (para Angular/React)
   function simulateRealClick(el) {
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -858,30 +906,82 @@
     }
   }
 
-  function pasteAndSendSingleMessage(text, callback) {
-    const target = findChatInput();
-    if (!target) {
-      showToast("⚠️ No se encontró la caja de chat (o conversación bloqueada)", "warning");
+  // Pegar y enviar con verificación real de vaciado de la caja y hasta 4 reintentos automáticos
+  async function pasteAndSendSingleMessage(text, callback) {
+    const initialTarget = await waitForChatInputReady(2800);
+    if (!initialTarget) {
+      showToast("⚠️ No se encontró la caja de chat habilitada", "warning");
       if (callback) callback(false);
-      return;
+      return false;
     }
 
-    setInputValue(target, text);
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const target = findChatInput() || initialTarget;
+      if (!target || !target.element) break;
 
-    setTimeout(() => {
+      // Si en el reintento la caja está vacía pero aún no habíamos pegado, o si quedó texto atascado, asegurar que tenga el texto
+      const currentVal = getInputCurrentText(target);
+      if (attempt === 1 || currentVal.length === 0) {
+        setInputValue(target, text);
+      } else {
+        // El texto ya está pegado en la caja pero no salió; refrescar eventos para habilitar envío
+        target.element.focus();
+        target.element.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+        target.element.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      await sleep(160);
+
+      // 1. Intentar envío por tecla Enter
       simulateEnterKey(target.element);
+      await sleep(220);
 
-      setTimeout(() => {
-        const remainingText = getInputCurrentText(target);
-        if (remainingText.length > 0) {
-          const sendBtn = findSendButtonNearInput(target.element);
-          if (sendBtn) {
-            simulateRealClick(sendBtn);
+      // Verificar si la caja ya se vació (mensaje enviado con éxito)
+      if (getInputCurrentText(target).length === 0) {
+        if (callback) callback(true);
+        return true;
+      }
+
+      // 2. Si el texto sigue en la caja, buscar y hacer clic en el botón Enviar junto al input
+      const sendBtn = findSendButtonNearInput(target.element);
+      if (sendBtn) {
+        simulateRealClick(sendBtn);
+        await sleep(250);
+        if (getInputCurrentText(target).length === 0) {
+          if (callback) callback(true);
+          return true;
+        }
+      }
+
+      // 3. En intentos >= 2, probar clic por coordenadas a la derecha de la caja de texto (donde suele estar el ícono de avión de papel)
+      if (attempt >= 2) {
+        const rect = target.element.getBoundingClientRect();
+        const centerY = rect.top + rect.height / 2;
+        for (const offsetX of [28, 48, 70]) {
+          const probeX = rect.right + offsetX;
+          if (probeX < window.innerWidth - 10) {
+            const rightEl = document.elementFromPoint(probeX, centerY);
+            if (rightEl && !isElementInOurOverlay(rightEl) && rightEl !== target.element) {
+              const clickableRight = rightEl.closest('button, [role="button"], a') || rightEl;
+              simulateRealClick(clickableRight);
+              await sleep(200);
+              if (getInputCurrentText(target).length === 0) {
+                if (callback) callback(true);
+                return true;
+              }
+            }
           }
         }
-        if (callback) callback(true);
-      }, 220);
-    }, 140);
+      }
+
+      await sleep(200);
+    }
+
+    // Comprobación final
+    const finalTarget = findChatInput() || initialTarget;
+    const sentOk = finalTarget ? getInputCurrentText(finalTarget).length === 0 : false;
+    if (callback) callback(sentOk);
+    return sentOk;
   }
 
   // ==============================================================
@@ -905,7 +1005,7 @@
       return false;
     }
 
-    const target = findChatInput();
+    const target = await waitForChatInputReady(2500);
     if (!target) {
       showToast("⚠️ Abre un chat habilitado primero", "warning");
       if (onComplete) onComplete(false);
@@ -946,11 +1046,10 @@
       showToast(`⚡ 1/2 Enviando saludo inmediato...`, "info");
       if (badge) badge.innerText = `⚡ Enviando saludo inmediato...`;
 
-      const step1Success = await new Promise(resolve => {
-        pasteAndSendSingleMessage(BASE_GREETING, (ok) => resolve(ok));
-      });
+      const step1Success = await pasteAndSendSingleMessage(BASE_GREETING);
 
       if (!step1Success) {
+        showToast("⚠️ No se pudo confirmar el envío del saludo, reintentará...", "warning");
         isSendingLock = false;
         if (onComplete) onComplete(false);
         return false;
@@ -1006,22 +1105,25 @@
     const finalTicket = freshDetected?.ticketNum || initialTicketNum;
     const finalSig = freshDetected?.signature || initialSig;
 
-    markTicketAsAnswered(finalSot, finalTicket, finalSig);
-
     if (badge) {
       badge.innerText = `🚀 2/2 Enviando: "${secondMessageText}"`;
     }
     showToast(`🚀 2/2 Enviando: "${secondMessageText}"`, "info");
 
-    pasteAndSendSingleMessage(secondMessageText, () => {
+    const step2Success = await pasteAndSendSingleMessage(secondMessageText);
+    if (step2Success) {
+      markTicketAsAnswered(finalSot, finalTicket, finalSig);
       showToast(`✅ Atención completada${finalSot ? ' (SOT ' + finalSot + ')' : ''}`, "success");
-      setTimeout(() => {
-        isSendingLock = false;
-        if (onComplete) onComplete(true);
-      }, 1200);
-    });
+    } else {
+      showToast(`⚠️ El 2° mensaje quedó en caja; verifica el envío`, "warning");
+    }
 
-    return true;
+    setTimeout(() => {
+      isSendingLock = false;
+      if (onComplete) onComplete(step2Success);
+    }, 1200);
+
+    return step2Success;
   }
 
   // ==============================================================
@@ -1243,19 +1345,16 @@
     if (asigInfo) {
       const { colLeft, colRight, tabBarBottom, leftColumnContainer } = asigInfo;
 
-      // Buscar todos los elementos visibles dentro de las coordenadas de la lista izquierda debajo de "Asignados(N)"
       const allLeftEls = Array.from(leftColumnContainer.querySelectorAll('div, li, a, mat-list-item')).filter(el => {
         if (isElementInOurOverlay(el)) return false;
         if (el.offsetParent === null) return false;
         const r = el.getBoundingClientRect();
 
-        // Debe estar debajo de la barra "Asignados" y dentro del ancho de la columna izquierda
         if (r.top < tabBarBottom - 3) return false;
         if (r.top > window.innerHeight - 35) return false;
         if (r.left < colLeft - 12 || r.left > colRight - 40) return false;
         if (r.right > colRight + 25) return false;
 
-        // Dimensiones de una fila/tarjeta de ticket en la lista izquierda
         if (r.width < 90) return false;
         if (r.height < 38 || r.height > 155) return false;
 
@@ -1266,7 +1365,6 @@
       });
 
       if (allLeftEls.length > 0) {
-        // Priorizar elementos que tengan cursor: pointer (los ítems clicables reales de Angular/React)
         const pointerEls = allLeftEls.filter(el => {
           try {
             return window.getComputedStyle(el).cursor === 'pointer';
@@ -1277,8 +1375,6 @@
 
         const basePool = pointerEls.length > 0 ? pointerEls : allLeftEls;
 
-        // Si un contenedor A envuelve a un contenedor B y tienen casi la misma altura (< 18px de diferencia),
-        // nos quedamos con B (el elemento interno real del ticket, NO el wrapper externo de la lista)
         const innerCards = basePool.filter(el => {
           const rA = el.getBoundingClientRect();
           const hasTightInnerCard = basePool.some(other => {
@@ -1289,7 +1385,6 @@
           return !hasTightInnerCard;
         });
 
-        // Agrupar por posición vertical (Y) para obtener 1 tarjeta única por cada fila de ticket (separadas por al menos 36px)
         const sortedByTop = (innerCards.length > 0 ? innerCards : basePool).sort(
           (a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top
         );
@@ -1314,7 +1409,6 @@
       }
     }
 
-    // Fallback por selectores clásicos
     const candidateSelectors = [
       'div[class*="conversation-item"]',
       'div[class*="chat-item"]',
@@ -1340,7 +1434,6 @@
     return [];
   }
 
-  // Hace clic garantizado sobre la tarjeta del ticket en la columna izquierda para que Laraigo lo abra
   async function clickAndOpenTicketCard(ticketEl) {
     if (!ticketEl) return;
 
@@ -1351,17 +1444,13 @@
     const centerX = rect.left + rect.width * 0.45;
     const centerY = rect.top + rect.height * 0.5;
 
-    // 1. Obtener el elemento exacto bajo el punto central (igual que el clic físico del mouse)
     const hitEl = document.elementFromPoint(centerX, centerY);
     if (hitEl && !isElementInOurOverlay(hitEl)) {
       simulateRealClick(hitEl);
     }
 
-    // 2. Clic también en el propio contenedor de la fila del ticket
     simulateRealClick(ticketEl);
 
-    // 3. Esperar 550ms y verificar si ya se abrió el chat en el centro;
-    //    si sigue vacío, probar clic en el texto/nombre interno de la tarjeta
     await sleep(550);
     if (!isAnyTicketCurrentlyOpenInCenter()) {
       const innerClickable = ticketEl.querySelector('span, b, strong, p, a, div');
@@ -1376,7 +1465,6 @@
     }
   }
 
-  // Vigilante instantáneo: cuando la bandeja estaba vacía ("Asignados(0)") y cae un ticket nuevo, dispara la apertura de inmediato
   function startInstantInboxArrivalWatcher() {
     if (inboxArrivalObserver) inboxArrivalObserver.disconnect();
 
@@ -1384,7 +1472,6 @@
     inboxArrivalObserver = new MutationObserver(() => {
       if (!isScanningQueue || isPausedForQuestion || isSendingLock || isStepInProgress || isDisabledInThisTab) return;
 
-      // Si actualmente no hay chat abierto en el centro y acaba de aparecer un ticket en Asignados(1..N)
       if (!isAnyTicketCurrentlyOpenInCenter()) {
         const asigInfo = getAsignadosColumnInfo();
         const tickets = getInboxTicketElements();
@@ -1468,6 +1555,7 @@
       }
 
       await clickAndOpenTicketCard(ticketEl);
+      await waitForTicketContentToLoad(3200);
 
       if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) {
         isStepInProgress = false;
@@ -1482,22 +1570,20 @@
       return;
     }
 
-    // Caso 2: "Asignados(N)" dice que hay >= 1 ticket pero aún no se renderizó la fila o el usuario no está en la pestaña Asignados
+    // Caso 2: "Asignados(N)" dice que hay >= 1 ticket pero aún no se detectó la fila
     if (asigInfo && asigInfo.assignedCount > 0) {
       if (badge) {
         badge.innerText = `🔔 Asignados(${asigInfo.assignedCount}) detectado. Abriendo primer ticket...`;
       }
-      // Asegurar que la pestaña "Asignados" esté activa haciéndole clic
       simulateRealClick(asigInfo.asignadosEl);
       await sleep(350);
 
-      // Hacer clic por coordenadas en la posición del primer ticket debajo de la pestaña "Asignados"
       const firstRowX = asigInfo.colLeft + (asigInfo.colRight - asigInfo.colLeft) * 0.45;
       const firstRowY = asigInfo.tabBarBottom + 38;
       const targetAtFirstRow = document.elementFromPoint(firstRowX, firstRowY);
       if (targetAtFirstRow && !isElementInOurOverlay(targetAtFirstRow)) {
         simulateRealClick(targetAtFirstRow);
-        await sleep(700);
+        await waitForTicketContentToLoad(3200);
       }
 
       if (isAnyTicketCurrentlyOpenInCenter()) {
@@ -1509,7 +1595,7 @@
       }
     }
 
-    // Caso 3: Si ya hay un chat abierto en el centro aunque la lista izquierda esté en 0
+    // Caso 3: Si ya hay un chat abierto en el centro
     if (isAnyTicketCurrentlyOpenInCenter()) {
       await processCurrentOpenTicket(() => {
         isStepInProgress = false;
@@ -1518,7 +1604,7 @@
       return;
     }
 
-    // Caso 4: Bandeja totalmente vacía ("Asignados(0)") -> Quedarse vigilando hasta que caiga uno
+    // Caso 4: Bandeja totalmente vacía ("Asignados(0)")
     if (badge) {
       badge.innerText = `👀 Bandeja vacía (Asignados: 0). Esperando nuevo ticket para abrirlo...`;
     }
