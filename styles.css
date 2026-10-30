@@ -13,8 +13,174 @@
   color: #1f2937;
   z-index: 9999999;
   border: 1px solid #e5e7eb;
-  transition: all 0.2s ease-in-out;
+  transition: width 0.18s ease, height 0.18s ease, border-radius 0.18s ease, box-shadow 0.2s ease;
   overflow: hidden;
+}
+
+/* =========================================================
+   MODO ULTRA-COMPACTO: "UN CUADRITO" (46px x 46px)
+   ========================================================= */
+.laraigo-copilot-widget.lc-cube-mode {
+  width: 46px !important;
+  height: 46px !important;
+  border-radius: 11px !important;
+  border: 2px solid #ffffff !important;
+  background: linear-gradient(135deg, #da291c 0%, #991b1b 100%) !important;
+  box-shadow: 0 6px 18px rgba(218, 41, 28, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25) !important;
+  cursor: pointer;
+  padding: 0 !important;
+}
+
+.laraigo-copilot-widget.lc-cube-mode:hover {
+  transform: scale(1.06);
+  box-shadow: 0 8px 22px rgba(218, 41, 28, 0.6), 0 3px 8px rgba(0, 0, 0, 0.3) !important;
+}
+
+.laraigo-copilot-widget.lc-cube-mode .lc-header,
+.laraigo-copilot-widget.lc-cube-mode .lc-body {
+  display: none !important;
+}
+
+.lc-mini-cube {
+  display: none;
+  width: 100%;
+  height: 100%;
+  position: relative;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  color: #ffffff;
+}
+
+.laraigo-copilot-widget.lc-cube-mode .lc-mini-cube {
+  display: flex !important;
+}
+
+.lc-cube-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid #ffffff;
+}
+
+.lc-cube-dot.active {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e;
+}
+
+.lc-cube-dot.paused {
+  background: #f59e0b;
+}
+
+.lc-cube-icon {
+  font-size: 17px;
+  line-height: 1;
+  margin-top: 2px;
+}
+
+.lc-cube-mode-tag {
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  padding: 0px 3px;
+  border-radius: 3px;
+  margin-top: 1px;
+  line-height: 1.15;
+}
+
+.lc-cube-mode-tag.beta {
+  background: #f59e0b;
+  color: #111827;
+}
+
+.lc-cube-mode-tag.fast {
+  background: rgba(0, 0, 0, 0.35);
+  color: #ffffff;
+}
+
+/* =========================================================
+   SELECTOR DE 2 MODOS Y ETIQUETA BETA
+   ========================================================= */
+.lc-header-mode-badge {
+  font-size: 9.5px;
+  font-weight: 800;
+  padding: 2px 5px;
+  border-radius: 4px;
+  letter-spacing: 0.4px;
+}
+
+.lc-header-mode-badge.beta {
+  background: #fbbf24;
+  color: #111827;
+}
+
+.lc-header-mode-badge.fast {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+}
+
+.lc-mode-selector {
+  display: flex;
+  gap: 5px;
+  background: #f1f5f9;
+  padding: 4px;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  border: 1px solid #e2e8f0;
+}
+
+.lc-mode-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.lc-mode-btn:hover {
+  color: #0f172a;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.lc-mode-btn.active {
+  background: #ffffff;
+  color: #da291c;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+}
+
+.lc-beta-tag {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 800;
+  padding: 1px 4px;
+  border-radius: 3px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.lc-greeting-only-info {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  color: #0369a1;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.38;
 }
 
 /* Pastilla discreta cuando el Copiloto está apagado en esa pestaña */

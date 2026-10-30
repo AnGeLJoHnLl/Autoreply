@@ -1,26 +1,27 @@
-# Laraigo Auto-Reply Copilot (v1.9.2) - Soporte Técnicos de Campo Claro
+# Laraigo Auto-Reply Copilot (v2.0.0) - Soporte Técnicos de Campo Claro
 
 Extensión para Google Chrome / Microsoft Edge diseñada para la bandeja de atención de **Laraigo** (`https://claro.laraigo.com/message_inbox`).
 
 ---
 
-## ✨ Novedades de la versión 1.9.2
+## ✨ Novedades de la versión 2.0.0
 
-- **Atención 100% Automática sin Entrar al Ticket (2° Plano por API + Socket.IO):**
-  - **No necesitas hacer clic ni entrar al ticket** para que se notifique o se responda. Puedes quedarte trabajando en tu ticket actual en la misma pestaña sin que cambie de conversación ni mueva tu scroll.
-  - Detecta la llegada de nuevos tickets en `Asignados` en tiempo real mediante `Socket.IO` y sondeo directo de `UFN_CONVERSATION_SEL_TICKETSBYUSER` (filtrando estrictamente `status === "ASIGNADO"`).
-- **Notificación Nativa de Windows al Instante (Sin entrar al ticket):**
-  - Apenas cae un ticket en `Asignados`, lanza la notificación de Windows con el número de ticket y nombre del técnico (con filtro estricto de **1 sola vez por ticket**).
-- **Envío Automático Garantizado del 1° y 2° Mensaje (0s + 5s) sin Recargar la Página:**
-  1. **Paso 1 (`0s` inmediato):** Envía `"Hola Técnico, Procederemos con la atención"` directo a `POST https://claroapi.laraigo.com/api/ticket/reply` y registra el ticket para no duplicar nunca el saludo al abrirlo.
-  2. **Paso 2 (`5s` de espera en 2° plano):** Espera 5 segundos para que terminen de llegar las imágenes, videos o cintillos del técnico.
-  3. **Paso 3 (`5s` — Aislamiento puro por API + Reintentos automáticos):** Consulta por API (`POST /api/multi` con respaldo a `/api/main`) el `Submotivo:`, la `SOT`, los cintillos y las fotos enviadas exclusivamente del ticket nuevo (sin mezclar datos del ticket que tengas abierto en pantalla) y envía el **2° mensaje exacto** con reintentos automáticos sin necesidad de refrescar la página (`F5`).
-- **Control Independiente por Pestaña (`🟢 Activo` / `🔴 No activo`):**
-  - La auto-atención en segundo plano arranca **encendida por defecto** en cualquier pestaña que esté en `🟢 Activo`. Puedes apagarla en una pestaña específica cambiando a `🔴 No activo`.
+- **2 Modos de Operación Configurables (desde el panel flotante o desde el icono de la extensión):**
+  1. **🔔⚡ Modo 1: Solo Notificación + Saludo Instantáneo (`0s`):**
+     - Lanza la notificación nativa de Windows apenas cae un ticket nuevo en `Asignados` (1 sola vez por ticket) y envía **únicamente el 1° saludo instantáneo** (`"Hola Técnico, Procederemos con la atención"`) en 2° plano sin enviar segundas respuestas automáticas.
+     - Mantiene el panel limpio ocultando las opciones de segundas respuestas.
+  2. **🧠 Modo 2: Modo Completo + 2° Respuestas Inteligentes (`BETA`):**
+     - Identificado con la insignia **`BETA`**, habilita el panel completo con el detector de `Submotivo:`, capturas TOA, cintillos y botones de segundas respuestas.
+     - Ejecuta el flujo completo 100% en 2° plano por API: **Notificación Windows + 1° Saludo (`0s`) ➔ Espera de `5s` ➔ Análisis de evidencias ➔ 2° Respuesta automática** sin cambiar de chat ni scrollear.
+- **Minimizado Ultra-Compacto en "Un Cuadrito" (`46px × 46px`):**
+  - Al pulsar el botón de minimizar (`🗕`), el panel se convierte en un **cuadrito flotante de `46px × 46px`** para no ocupar espacio en pantalla.
+  - Muestra un indicador luminoso de estado (`🟢`), el modo activo (`1°` o `BETA`), se puede **arrastrar a cualquier esquina** y con **un clic** vuelve a desplegar el panel completo.
+- **Atención 100% Automática en 2° Plano (API + Socket.IO) sin cambiar de chat ni recargar la página.**
+- **Control Independiente por Pestaña (`🟢 Activo` / `🔴 No activo`).**
 
 ---
 
-## 🎯 Reglas Inteligentes por `Submotivo:`
+## 🎯 Reglas Inteligentes por `Submotivo:` (Modo Completo `BETA`)
 
 | Submotivo | Con Evidencia / Captura | Sin Evidencia / Captura |
 | :--- | :--- | :--- |
@@ -38,5 +39,5 @@ Extensión para Google Chrome / Microsoft Edge diseñada para la bandeja de aten
 1. Entra a tu repositorio: 👉 [https://github.com/AnGeLJoHnLl/Autoreply](https://github.com/AnGeLJoHnLl/Autoreply)
 2. Haz clic en el botón verde **`<> Code`** ➔ **`Download ZIP`** y descomprime la carpeta.
 3. Abre `chrome://extensions` (o `edge://extensions`) con el **Modo de desarrollador** activo.
-4. Haz clic en **"Cargar descomprimida"** y selecciona la carpeta descomprimida (o presiona **🔄 Recargar** y verifica que muestre **v1.9.0**).
+4. Haz clic en **"Cargar descomprimida"** y selecciona la carpeta descomprimida (o presiona **🔄 Recargar** y verifica que muestre **v2.0.0**).
 5. Recarga tu pestaña de Laraigo (`F5`).

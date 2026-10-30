@@ -63,9 +63,15 @@
   }
 
   // ==============================================================
-  // ESTADO INDEPENDIENTE POR PESTAÑA
+  // ESTADO INDEPENDIENTE POR PESTAÑA Y MODOS DE OPERACIÓN
+  //   - 'greeting_only': Solo Notificación + Saludo Instantáneo (0s)
+  //   - 'full_beta':     Modo Completo + 2° Respuestas Inteligentes (BETA)
   // ==============================================================
   let isDisabledInThisTab = sessionStorage.getItem('laraigo_copilot_tab_disabled') === 'true';
+  let currentOperationMode = localStorage.getItem('laraigo_copilot_mode') === 'greeting_only'
+    ? 'greeting_only'
+    : (localStorage.getItem('laraigo_copilot_mode') === 'full_beta' ? 'full_beta' : 'greeting_only');
+  let isMinimizedToCube = localStorage.getItem('laraigo_copilot_minimized') === 'true';
   let manualObserver = null;
   let inboxArrivalObserver = null;
 
@@ -77,7 +83,7 @@
   let isSendingLock = false;
   let isStepInProgress = false;
 
-  chrome.storage.local.get(["laraigo_answered_registry"], (res) => {
+  chrome.storage.local.get(["laraigo_answered_registry", "laraigo_copilot_mode"], (res) => {
     if (res.laraigo_answered_registry) {
       const now = Date.now();
       const cleaned = {};
@@ -89,11 +95,24 @@
       answeredRegistry = cleaned;
       chrome.storage.local.set({ laraigo_answered_registry: answeredRegistry });
     }
+    if (res.laraigo_copilot_mode === 'greeting_only' || res.laraigo_copilot_mode === 'full_beta') {
+      if (res.laraigo_copilot_mode !== currentOperationMode) {
+        setOperationMode(res.laraigo_copilot_mode, false);
+      }
+    }
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.laraigo_answered_registry?.newValue) {
-      answeredRegistry = changes.laraigo_answered_registry.newValue;
+    if (area === "local") {
+      if (changes.laraigo_answered_registry?.newValue) {
+        answeredRegistry = changes.laraigo_answered_registry.newValue;
+      }
+      if (changes.laraigo_copilot_mode?.newValue) {
+        const newMode = changes.laraigo_copilot_mode.newValue;
+        if ((newMode === 'greeting_only' || newMode === 'full_beta') && newMode !== currentOperationMode) {
+          setOperationMode(newMode, false);
+        }
+      }
     }
   });
 
@@ -2104,6 +2123,8 @@
       // Notificar en Windows al instante sin necesidad de entrar al ticket
       notifyNewTicketOnce(tNum, ticketMeta.displayname || '');
 
+      const isGreetingOnlyMode = currentOperationMode === 'greeting_only';
+
       // Verificar si ya fue saludado previamente (en memoria, en storage o por lastreplyuser de la API)
       let greetedNow = false;
       const alreadyGreetedFast =
@@ -2112,6 +2133,9 @@
 
       if (alreadyGreetedFast) {
         markTicketAsGreeted(null, tNum, convId);
+        if (isGreetingOnlyMode) {
+          return true;
+        }
       } else {
         // PASO 1 RAPIDÍSIMO (0ms): Si el ticket recién cayó (lastreplyuser === null),
         // enviamos el saludo de inmediato sin esperar ninguna consulta previa
@@ -2123,7 +2147,15 @@
           markTicketAsGreeted(null, tNum, convId);
           greetedTimestampByTicket.set(tNum, Date.now());
           greetedNow = true;
-          showToast(`⚡ Ticket #${tNum}: 1° Saludo enviado en 2° plano (esperando 5s...)`, "info");
+          if (isGreetingOnlyMode) {
+            if (badge) {
+              badge.innerText = `✅ Ticket #${tNum}: Notificado + Saludo instantáneo enviado`;
+            }
+            showToast(`⚡ Ticket #${tNum}: Saludo instantáneo enviado en 2° plano`, "success");
+            return true;
+          } else {
+            showToast(`⚡ Ticket #${tNum}: 1° Saludo enviado en 2° plano (esperando 5s...)`, "info");
+          }
         }
       }
 
@@ -2169,13 +2201,28 @@
           markTicketAsGreeted(dPre?.sot || null, tNum, convId);
           greetedTimestampByTicket.set(tNum, Date.now());
           greetedNow = true;
+          if (isGreetingOnlyMode) {
+            if (badge) {
+              badge.innerText = `✅ Ticket #${tNum}: Notificado + Saludo instantáneo enviado`;
+            }
+            showToast(`⚡ Ticket #${tNum}: Saludo instantáneo enviado en 2° plano`, "success");
+            return true;
+          }
           showToast(`⚡ Ticket #${tNum}: 1° Saludo enviado en 2° plano (esperando 5s...)`, "info");
         } else {
           return false;
         }
       }
 
-      // PASO 2 (5s): Esperar los 5 segundos desde el envío del saludo (o solo el remanente si es un reintento del 2° mensaje)
+      // Si está en modo "Solo Notificación + Saludo Instantáneo", terminamos aquí sin enviar 2° respuesta
+      if (currentOperationMode === 'greeting_only') {
+        if (badge) {
+          badge.innerText = `✅ Ticket #${tNum}: Saludo instantáneo listo (Modo Solo Saludo)`;
+        }
+        return true;
+      }
+
+      // PASO 2 (5s - MODO COMPLETO BETA): Esperar los 5 segundos desde el envío del saludo
       let waitMs = SECOND_MESSAGE_DELAY_MS;
       if (!greetedNow) {
         const greetedAt = greetedTimestampByTicket.get(tNum);
@@ -2187,11 +2234,11 @@
       }
 
       if (badge) {
-        badge.innerText = `⏳ [2° Plano] Ticket #${tNum}: Esperando ${Math.ceil(waitMs / 1000)}s por fotos/cintillos...`;
+        badge.innerText = `⏳ [BETA 2° Plano] Ticket #${tNum}: Esperando ${Math.ceil(waitMs / 1000)}s por fotos/cintillos...`;
       }
       await sleep(waitMs);
 
-      if (isDisabledInThisTab) return false;
+      if (isDisabledInThisTab || currentOperationMode === 'greeting_only') return false;
 
       // PASO 3: Re-consultar mensajes/adjuntos del ticket vía API tras los 5 segundos (con hasta 3 reintentos automáticos)
       let secondFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid, tNum);
@@ -2204,7 +2251,7 @@
       let detected = scanScreenForSubmotivo(buildDirectApiText(secondFetch), tNum, true) || dPre;
       for (let retry = 0; retry < 3 && (!detected || !detected.rule); retry++) {
         await sleep(1200);
-        if (isDisabledInThisTab) return false;
+        if (isDisabledInThisTab || currentOperationMode === 'greeting_only') return false;
         secondFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid, tNum);
         const isVisibleOnScreen = getVisibleDomHeaderTicketNumber() === tNum;
         detected = scanScreenForSubmotivo(buildDirectApiText(secondFetch), tNum, !isVisibleOnScreen) || dPre;
@@ -2236,7 +2283,7 @@
       if (!secondMessageText) return false;
 
       if (badge) {
-        badge.innerText = `🚀 [2° Plano] Ticket #${tNum}: Enviando 2° "${secondMessageText}"...`;
+        badge.innerText = `🚀 [BETA 2° Plano] Ticket #${tNum}: Enviando 2° "${secondMessageText}"...`;
       }
 
       // Enviar 2° mensaje vía API con hasta 3 intentos automáticos para garantizar la entrega sin recargar la página
@@ -2294,6 +2341,22 @@
   // ==========================================
   // MOTOR DE AUTO-ATENCIÓN EN 2° PLANO (SIN SCROLL NI CAMBIO DE CHAT)
   // ==========================================
+  function updateCubeStatusUI() {
+    const cubeDot = document.getElementById('lc-cube-dot');
+    const cubeModeTag = document.getElementById('lc-cube-mode-tag');
+    const cubeIcon = document.getElementById('lc-cube-icon');
+    if (cubeDot) {
+      cubeDot.className = `lc-cube-dot ${isScanningQueue && !isDisabledInThisTab ? 'active' : 'paused'}`;
+    }
+    if (cubeModeTag) {
+      cubeModeTag.innerText = currentOperationMode === 'full_beta' ? 'BETA' : '1°';
+      cubeModeTag.className = `lc-cube-mode-tag ${currentOperationMode === 'full_beta' ? 'beta' : 'fast'}`;
+    }
+    if (cubeIcon) {
+      cubeIcon.innerText = currentOperationMode === 'full_beta' ? '🤖' : '⚡';
+    }
+  }
+
   function stopScannerIfRunning() {
     if (isScanningQueue) {
       isScanningQueue = false;
@@ -2310,6 +2373,7 @@
       if (badge) {
         badge.innerText = "Auto-atención en pausa";
       }
+      updateCubeStatusUI();
     }
   }
 
@@ -2327,9 +2391,12 @@
         btn.innerText = "⏹️ Pausar Auto-Atención en 2° Plano";
       }
       if (badge) {
-        badge.innerText = "Activo en 2° plano: responde sin cambiar de ticket ni scrollear...";
+        badge.innerText = currentOperationMode === 'greeting_only'
+          ? "Activo (Solo Notif. + Saludo 0s): vigilando en 2° plano..."
+          : "Activo (Modo Completo BETA): Saludo 0s + 2° Respuesta en 2° plano...";
       }
       showToast("🚀 Auto-Atención en 2° plano activa (sin cambiar de chat)", "info");
+      updateCubeStatusUI();
       startInstantInboxArrivalWatcher();
       runNextScannerStep();
     } else {
@@ -2348,13 +2415,22 @@
       // 1. Consultar la lista actualizada de tickets en "Asignados" vía API en 2° plano (sin hacer clic en la UI)
       await pollAssignedTicketsViaBridge();
 
-      // 2. Lanzar atención en 2° plano para todos los tickets ASIGNADO pendientes
+      // 2. Lanzar atención en 2° plano para todos los tickets ASIGNADO pendientes según el modo activo
       const pendingAssigned = [];
       for (const t of apiTicketsByTicketNum.values()) {
         if (!t || !t.ticketnum || t.status !== 'ASIGNADO') continue;
         const tNum = String(t.ticketnum).trim();
-        if (wasTicketAlreadyAnsweredInStorage(null, tNum, null).answered) continue;
         if (backgroundTicketsInProgress.has(tNum)) continue;
+
+        if (currentOperationMode === 'greeting_only') {
+          notifyNewTicketOnce(tNum, t.displayname || '');
+          if (wasTicketAlreadyGreeted(null, tNum, t.conversationid) || Boolean(t.lastreplyuser)) {
+            markTicketAsGreeted(null, tNum, t.conversationid);
+            continue;
+          }
+        } else {
+          if (wasTicketAlreadyAnsweredInStorage(null, tNum, null, t.conversationid).answered) continue;
+        }
         pendingAssigned.push(t);
       }
 
@@ -2368,12 +2444,18 @@
         const openMeta = getActiveTicketMeta(openTkt);
         if (openMeta && openMeta.conversationid && openMeta.ticketnum) {
           const openNum = String(openMeta.ticketnum).trim();
-          if (!wasTicketAlreadyAnsweredInStorage(null, openNum, null).answered && !backgroundTicketsInProgress.has(openNum)) {
+          const alreadyDoneForMode = currentOperationMode === 'greeting_only'
+            ? (wasTicketAlreadyGreeted(null, openNum, openMeta.conversationid) || Boolean(openMeta.lastreplyuser))
+            : wasTicketAlreadyAnsweredInStorage(null, openNum, null, openMeta.conversationid).answered;
+
+          if (!alreadyDoneForMode && !backgroundTicketsInProgress.has(openNum)) {
             processTicketInBackgroundViaApi(openMeta);
           }
         }
       } else if (badge && backgroundTicketsInProgress.size === 0) {
-        badge.innerText = `👀 Vigilando Asignados en 2° plano (sin cambiar tu chat actual)...`;
+        badge.innerText = currentOperationMode === 'greeting_only'
+          ? `👀 Vigilando Asignados (Modo: Solo Notif. + Saludo 0s)...`
+          : `👀 Vigilando Asignados (Modo Completo BETA: Saludo + 2° Resp.)...`;
       }
     } finally {
       isStepInProgress = false;
@@ -2480,8 +2562,10 @@
       debounceTimer = setTimeout(async () => {
         if (isDisabledInThisTab || isSendingLock) return;
         const detected = scanScreenForSubmotivo();
-        const contextStats = await analyzeFullTicketContext(detected);
-        updateDetectedPreview(detected, contextStats);
+        if (currentOperationMode === 'full_beta') {
+          const contextStats = await analyzeFullTicketContext(detected);
+          updateDetectedPreview(detected, contextStats);
+        }
 
         // Si el modo automático está activo y hay un ticket abierto sin responder aún:
         if (isScanningQueue && !isPausedForQuestion && detected && detected.rule && !detected.casuistica) {
@@ -2489,21 +2573,118 @@
           const openMeta = getActiveTicketMeta(tNum);
           const convId = openMeta?.conversationid || lastOpenedConvId || null;
 
-          const alreadyInDom = doesCurrentChatAlreadyHaveSecondQuestion();
-          const alreadyInStorage = wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature, convId).answered;
-          const inBgProgress = (tNum && backgroundTicketsInProgress.has(tNum)) || backgroundTicketsInProgress.size > 0;
-
-          if (!alreadyInDom && !alreadyInStorage && !inBgProgress && !skippedTickets.has(detected.signature)) {
-            if (openMeta && openMeta.conversationid && openMeta.ticketnum) {
+          if (currentOperationMode === 'greeting_only') {
+            const alreadyGreeted =
+              doesCurrentChatAlreadyHaveGreeting() ||
+              wasTicketAlreadyGreeted(detected.sot, tNum, convId) ||
+              Boolean(openMeta?.lastreplyuser);
+            const inBgProgress = (tNum && backgroundTicketsInProgress.has(tNum)) || backgroundTicketsInProgress.size > 0;
+            if (!alreadyGreeted && !inBgProgress && openMeta && openMeta.conversationid && openMeta.ticketnum) {
               processTicketInBackgroundViaApi(openMeta);
-            } else {
-              safeSendTwoStepSmartReply(detected.rule, detected, true);
+            }
+          } else {
+            const alreadyInDom = doesCurrentChatAlreadyHaveSecondQuestion();
+            const alreadyInStorage = wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature, convId).answered;
+            const inBgProgress = (tNum && backgroundTicketsInProgress.has(tNum)) || backgroundTicketsInProgress.size > 0;
+
+            if (!alreadyInDom && !alreadyInStorage && !inBgProgress && !skippedTickets.has(detected.signature)) {
+              if (openMeta && openMeta.conversationid && openMeta.ticketnum) {
+                processTicketInBackgroundViaApi(openMeta);
+              } else {
+                safeSendTwoStepSmartReply(detected.rule, detected, true);
+              }
             }
           }
         }
       }, 650);
     });
     manualObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // ==========================================
+  // CAMBIO DE MODO Y MINIMIZADO A "CUADRITO"
+  // ==========================================
+  function setOperationMode(mode, notifyUser = true) {
+    if (mode !== 'greeting_only' && mode !== 'full_beta') return;
+    currentOperationMode = mode;
+    localStorage.setItem('laraigo_copilot_mode', mode);
+    try {
+      chrome.storage.local.set({ laraigo_copilot_mode: mode });
+    } catch (e) {}
+
+    const btnGreeting = document.getElementById('lc-mode-greeting');
+    const btnBeta = document.getElementById('lc-mode-beta');
+    const betaSection = document.getElementById('lc-beta-features-section');
+    const greetingInfo = document.getElementById('lc-greeting-only-info');
+    const headerModeBadge = document.getElementById('lc-header-mode-badge');
+    const badge = document.getElementById('lc-scanner-status');
+
+    if (btnGreeting && btnBeta) {
+      btnGreeting.classList.toggle('active', mode === 'greeting_only');
+      btnBeta.classList.toggle('active', mode === 'full_beta');
+    }
+
+    if (betaSection) {
+      betaSection.style.display = mode === 'full_beta' ? 'block' : 'none';
+    }
+    if (greetingInfo) {
+      greetingInfo.style.display = mode === 'greeting_only' ? 'block' : 'none';
+    }
+    if (headerModeBadge) {
+      if (mode === 'full_beta') {
+        headerModeBadge.innerText = 'BETA';
+        headerModeBadge.className = 'lc-header-mode-badge beta';
+      } else {
+        headerModeBadge.innerText = '1° SALUDO';
+        headerModeBadge.className = 'lc-header-mode-badge fast';
+      }
+    }
+
+    updateCubeStatusUI();
+
+    if (badge && isScanningQueue) {
+      badge.innerText = mode === 'greeting_only'
+        ? `👀 Vigilando Asignados (Modo: Solo Notif. + Saludo 0s)...`
+        : `👀 Vigilando Asignados (Modo Completo BETA: Saludo + 2° Resp.)...`;
+    }
+
+    if (notifyUser) {
+      if (mode === 'greeting_only') {
+        showToast("⚡ Modo activo: Solo Notificación + Saludo Instantáneo (0s)", "info");
+      } else {
+        showToast("🧠 Modo Completo (BETA) activo: Saludo + 2° Respuestas Inteligentes", "info");
+        const detected = scanScreenForSubmotivo();
+        analyzeFullTicketContext(detected).then(stats => updateDetectedPreview(detected, stats));
+      }
+      if (isScanningQueue && !isStepInProgress && !isDisabledInThisTab) {
+        clearTimeout(scannerLoopTimeout);
+        runNextScannerStep();
+      }
+    }
+  }
+
+  function setMinimizedToCube(minimized) {
+    isMinimizedToCube = Boolean(minimized);
+    localStorage.setItem('laraigo_copilot_minimized', isMinimizedToCube ? 'true' : 'false');
+
+    const container = document.getElementById('laraigo-copilot-container');
+    if (!container) return;
+
+    if (isMinimizedToCube) {
+      container.classList.add('lc-cube-mode');
+    } else {
+      container.classList.remove('lc-cube-mode');
+      // Asegurar que al expandir desde el cuadrito no quede cortado fuera de la pantalla
+      if (container.style.left && container.style.left !== 'auto') {
+        const currentLeft = parseFloat(container.style.left) || 0;
+        const currentTop = parseFloat(container.style.top) || 0;
+        const clampedLeft = Math.max(8, Math.min(window.innerWidth - 355, currentLeft));
+        const clampedTop = Math.max(8, Math.min(window.innerHeight - 260, currentTop));
+        container.style.left = `${clampedLeft}px`;
+        container.style.top = `${clampedTop}px`;
+      }
+    }
+    updateCubeStatusUI();
   }
 
   // ==========================================
@@ -2529,18 +2710,21 @@
       if (!isScanningQueue) {
         toggleScanner();
       }
+      updateCubeStatusUI();
       showToast("🟢 Activo en esta pestaña (Auto-atención 2° plano activa)", "success");
     }
   }
 
-  // Escuchar mensajes desde el Popup de la extensión (Activo / No activo por pestaña)
+  // Escuchar mensajes desde el Popup de la extensión (Activo / No activo y Modo de operación)
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!message) return;
       if (message.type === 'GET_TAB_STATUS') {
         sendResponse({
           active: !isDisabledInThisTab,
-          scanning: isScanningQueue
+          scanning: isScanningQueue,
+          mode: currentOperationMode,
+          minimized: isMinimizedToCube
         });
         return true;
       }
@@ -2549,20 +2733,36 @@
         setTabDisabledState(!shouldBeActive);
         sendResponse({
           active: !isDisabledInThisTab,
-          scanning: isScanningQueue
+          scanning: isScanningQueue,
+          mode: currentOperationMode,
+          minimized: isMinimizedToCube
+        });
+        return true;
+      }
+      if (message.type === 'SET_OPERATION_MODE') {
+        if (message.mode === 'greeting_only' || message.mode === 'full_beta') {
+          setOperationMode(message.mode, true);
+        }
+        sendResponse({
+          active: !isDisabledInThisTab,
+          scanning: isScanningQueue,
+          mode: currentOperationMode,
+          minimized: isMinimizedToCube
         });
         return true;
       }
     });
   }
 
-  function makeWidgetDraggable(widgetEl, handleEl) {
+  function makeWidgetDraggable(widgetEl, handleEl, onClickWithoutDrag = null) {
     let isDragging = false;
+    let hasMoved = false;
     let startX = 0, startY = 0, initialLeft = 0, initialTop = 0;
 
     handleEl.addEventListener('mousedown', (e) => {
-      if (e.target.tagName === 'BUTTON') return;
+      if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
       isDragging = true;
+      hasMoved = false;
       const rect = widgetEl.getBoundingClientRect();
       startX = e.clientX;
       startY = e.clientY;
@@ -2580,8 +2780,12 @@
       if (!isDragging) return;
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
-      const newLeft = Math.max(0, Math.min(window.innerWidth - 120, initialLeft + dx));
-      const newTop = Math.max(0, Math.min(window.innerHeight - 50, initialTop + dy));
+      if (Math.hypot(dx, dy) > 4) {
+        hasMoved = true;
+      }
+      const minVisibleW = widgetEl.classList.contains('lc-cube-mode') ? 48 : 120;
+      const newLeft = Math.max(0, Math.min(window.innerWidth - minVisibleW, initialLeft + dx));
+      const newTop = Math.max(0, Math.min(window.innerHeight - 48, initialTop + dy));
       widgetEl.style.left = `${newLeft}px`;
       widgetEl.style.top = `${newTop}px`;
     });
@@ -2590,12 +2794,15 @@
       if (isDragging) {
         isDragging = false;
         widgetEl.style.transition = 'all 0.2s ease-in-out';
+        if (!hasMoved && typeof onClickWithoutDrag === 'function') {
+          onClickWithoutDrag();
+        }
       }
     });
   }
 
   // ==========================================
-  // INTERFAZ DE USUARIO (WIDGET + PASTILLA DE PESTAÑA APAGADA)
+  // INTERFAZ DE USUARIO (WIDGET + CUADRITO MINIMIZADO + PASTILLA APAGADA)
   // ==========================================
   function initUI() {
     if (document.getElementById('laraigo-copilot-container')) return;
@@ -2611,23 +2818,47 @@
 
     const container = document.createElement('div');
     container.id = 'laraigo-copilot-container';
-    container.className = 'laraigo-copilot-widget';
+    container.className = `laraigo-copilot-widget ${isMinimizedToCube ? 'lc-cube-mode' : ''}`;
     container.style.display = isDisabledInThisTab ? 'none' : 'block';
 
+    const isBeta = currentOperationMode === 'full_beta';
+
     container.innerHTML = `
+      <!-- Vista Ultra-Compacta: "Un Cuadrito" (46x46px) al minimizar -->
+      <div class="lc-mini-cube" id="lc-mini-cube" title="Clic para abrir Copiloto Claro (Arrastra para mover)">
+        <span id="lc-cube-dot" class="lc-cube-dot ${isScanningQueue ? 'active' : 'paused'}"></span>
+        <span id="lc-cube-icon" class="lc-cube-icon">${isBeta ? '🤖' : '⚡'}</span>
+        <span id="lc-cube-mode-tag" class="lc-cube-mode-tag ${isBeta ? 'beta' : 'fast'}">${isBeta ? 'BETA' : '1°'}</span>
+      </div>
+
+      <!-- Encabezado normal del panel -->
       <div class="lc-header" id="lc-drag-handle" title="Arrastra desde aquí para mover el panel">
         <div class="lc-title">
-          <span class="lc-badge">CLARO</span> Copiloto Inteligente
+          <span class="lc-badge">CLARO</span>
+          <span>Copiloto</span>
+          <span id="lc-header-mode-badge" class="lc-header-mode-badge ${isBeta ? 'beta' : 'fast'}">
+            ${isBeta ? 'BETA' : '1° SALUDO'}
+          </span>
         </div>
         <div class="lc-actions">
           <button id="lc-btn-disable-tab" class="lc-btn-disable-tab" title="Haz clic para cambiar a NO ACTIVO en esta pestaña">
             🟢 Activo
           </button>
-          <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar / Maximizar">_</button>
+          <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar a cuadrito compacto">🗕</button>
         </div>
       </div>
 
       <div class="lc-body" id="lc-body">
+        <!-- Selector de 2 Modos de Operación -->
+        <div class="lc-mode-selector">
+          <button id="lc-mode-greeting" class="lc-mode-btn ${!isBeta ? 'active' : ''}" title="Solo notifica en Windows y envía el 1° Saludo instantáneo (0s)">
+            ⚡ Solo Notif. + Saludo
+          </button>
+          <button id="lc-mode-beta" class="lc-mode-btn ${isBeta ? 'active' : ''}" title="Modo Completo: Notificación + 1° Saludo (0s) + 2° Respuestas Inteligentes">
+            🧠 Completo <span class="lc-beta-tag">BETA</span>
+          </button>
+        </div>
+
         <!-- Modal de Pregunta ante Casuísticas o Duplicados -->
         <div id="lc-casuistica-modal" class="lc-casuistica-modal" style="display: none;">
           <div id="lc-casuistica-text" class="lc-casuistica-text"></div>
@@ -2637,48 +2868,72 @@
           </div>
         </div>
 
-        <!-- Detector en tiempo real del mensaje, imágenes y cintillos -->
-        <div id="lc-live-detected">
-          <div class="lc-detected-box waiting">
-            🔍 Abre un chat para analizar <code>Submotivo:</code>, fotos y cintillos
-          </div>
-        </div>
-
         <!-- Control de Auto-Atención en 2° Plano (Sin Scroll ni Cambio de Chat) -->
         <div class="lc-scanner-panel">
           <button id="lc-btn-scanner" class="lc-btn-scanner ${isScanningQueue ? 'active' : ''}">
             ${isScanningQueue ? '⏹️ Pausar Auto-Atención en 2° Plano' : '▶️ Auto-Atender en 2° Plano (Sin cambiar de chat)'}
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            ${isScanningQueue ? 'Activo en 2° plano: responde sin cambiar de ticket ni scrollear...' : 'Responde por API en 2° plano ➔ Saludo (0s) ➔ (5s) ➔ 2° Respuesta (Sin scroll)'}
+            ${isScanningQueue
+              ? (isBeta ? 'Activo (Modo Completo BETA): Saludo 0s + 2° Respuesta en 2° plano...' : 'Activo (Solo Notif. + Saludo 0s): vigilando en 2° plano...')
+              : 'Responde por API en 2° plano sin cambiar de ticket ni scrollear'}
           </div>
         </div>
 
-        <div class="lc-section-title">⚡ Submotivos Manuales (Saludo 0s + 5s Espera)</div>
-        <div class="lc-submotivos-grid" id="lc-submotivos-list"></div>
+        <!-- Info resumida cuando está en Modo 1 (Solo Notificación + Saludo Instantáneo) -->
+        <div id="lc-greeting-only-info" class="lc-greeting-only-info" style="display: ${!isBeta ? 'block' : 'none'};">
+          🔔 <b>Notificación Windows</b> + ⚡ <b>1° Saludo Instantáneo (0s)</b> en 2° plano.<br>
+          <small>No envía segundas respuestas automáticas. Cambia a <b>Completo BETA</b> arriba si deseas activar las 2° respuestas.</small>
+        </div>
+
+        <!-- Sección Completa (BETA): Detector y 2° Respuestas por Submotivo -->
+        <div id="lc-beta-features-section" style="display: ${isBeta ? 'block' : 'none'};">
+          <div id="lc-live-detected">
+            <div class="lc-detected-box waiting">
+              🔍 Abre un chat para analizar <code>Submotivo:</code>, fotos y cintillos
+            </div>
+          </div>
+
+          <div class="lc-section-title">
+            ⚡ 2° Respuestas por Submotivo <span class="lc-beta-tag">BETA</span>
+          </div>
+          <div class="lc-submotivos-grid" id="lc-submotivos-list"></div>
+        </div>
       </div>
     `;
 
     document.body.appendChild(container);
 
     const collapseBtn = container.querySelector('#lc-btn-collapse');
+    const miniCube = container.querySelector('#lc-mini-cube');
     const disableTabBtn = container.querySelector('#lc-btn-disable-tab');
-    const bodyEl = container.querySelector('#lc-body');
     const scannerBtn = container.querySelector('#lc-btn-scanner');
     const dragHandle = container.querySelector('#lc-drag-handle');
+    const modeGreetingBtn = container.querySelector('#lc-mode-greeting');
+    const modeBetaBtn = container.querySelector('#lc-mode-beta');
 
     collapseBtn.addEventListener('click', () => {
-      bodyEl.classList.toggle('lc-collapsed');
-      collapseBtn.innerText = bodyEl.classList.contains('lc-collapsed') ? '□' : '_';
+      setMinimizedToCube(true);
     });
 
     disableTabBtn.addEventListener('click', () => {
       setTabDisabledState(true);
     });
 
+    modeGreetingBtn.addEventListener('click', () => {
+      setOperationMode('greeting_only', true);
+    });
+
+    modeBetaBtn.addEventListener('click', () => {
+      setOperationMode('full_beta', true);
+    });
+
     scannerBtn.addEventListener('click', toggleScanner);
 
     makeWidgetDraggable(container, dragHandle);
+    makeWidgetDraggable(container, miniCube, () => {
+      setMinimizedToCube(false);
+    });
     renderSubmotivoButtons();
 
     // Sincronizar de inmediato con page-bridge.js para recibir tickets ASIGNADO capturados al cargar
