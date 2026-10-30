@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Laraigo Auto-Reply Copilot",
-  "version": "1.5.0",
-  "description": "Automatización inteligente para Laraigo Inbox (Claro): lee Submotivo, detecta capturas de TOA vs fotos de equipos y envía en 2 pasos.",
+  "version": "1.6.0",
+  "description": "Automatización inteligente para Laraigo Inbox (Claro): lee Submotivo por API/DOM, detecta capturas TOA y responde en 2 pasos.",
   "permissions": [
     "storage",
     "activeTab",
@@ -26,6 +26,16 @@
     "128": "icon128.png"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "*://*.laraigo.com/*"
+      ],
+      "js": [
+        "page-bridge.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "*://*.laraigo.com/*"

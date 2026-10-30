@@ -126,6 +126,187 @@
   const imageClassificationCache = new Map();
 
   // ==============================================================
+  // PUENTE DE RED CON LA API DE LARAIGO (page-bridge.js)
+  // Permite leer Submotivo/SOT directo del JSON (UFN_CONVERSATION_PERSON_SEL / INTERACTION)
+  // sin depender del scroll, y enviar mensajes directo a POST /api/ticket/reply
+  // ==============================================================
+  const apiTicketsByTicketNum = new Map();
+  const apiTicketsByConvId = new Map();
+  const apiInteractionsByConvId = new Map();
+  const apiPersonByTicketNum = new Map();
+  const apiGreetedTickets = new Set();
+  const pendingBridgeRequests = new Map();
+
+  window.addEventListener('message', async (event) => {
+    if (event.source !== window || !event.data || event.data.source !== 'LARAIGO_BRIDGE') return;
+
+    const msg = event.data;
+
+    // 1. Respuesta a comandos enviados desde content.js (SEND_API_REPLY / FETCH_CONVERSATION_INTERACTIONS)
+    if ((msg.type === 'API_REPLY_RESULT' || msg.type === 'FETCH_INTERACTIONS_RESULT') && msg.requestId) {
+      const resolver = pendingBridgeRequests.get(msg.requestId);
+      if (resolver) {
+        pendingBridgeRequests.delete(msg.requestId);
+        resolver(msg);
+      }
+      return;
+    }
+
+    // 2. Lista de tickets en bandeja "Asignados" (UFN_CONVERSATION_SEL_TICKETSBYUSER)
+    if (msg.type === 'ASSIGNED_TICKETS' && Array.isArray(msg.tickets)) {
+      for (const t of msg.tickets) {
+        if (!t || !t.ticketnum) continue;
+        const tNum = String(t.ticketnum).trim();
+        const cId = Number(t.conversationid);
+        apiTicketsByTicketNum.set(tNum, t);
+        if (cId) apiTicketsByConvId.set(cId, t);
+
+        // Si el Auto-Escáner está activo y cae un ticket en ASIGNADO sin respuesta del asesor (lastreplyuser === null),
+        // enviamos el saludo de inmediato (0ms) directo a POST /api/ticket/reply sin esperar siquiera a que abra el chat
+        if (
+          !isDisabledInThisTab &&
+          isScanningQueue &&
+          !isPausedForQuestion &&
+          t.status === 'ASIGNADO' &&
+          !t.lastreplyuser &&
+          !apiGreetedTickets.has(tNum) &&
+          !wasTicketAlreadyAnsweredInStorage(null, tNum, null).answered
+        ) {
+          apiGreetedTickets.add(tNum);
+          sendMessageViaLaraigoApi(BASE_GREETING, t, true).then((ok) => {
+            if (ok) {
+              showToast(`⚡ Saludo enviado al instante (Ticket ${tNum})`, 'info');
+            } else {
+              apiGreetedTickets.delete(tNum);
+            }
+          });
+        }
+      }
+
+      // Despertar el escáner si estaba esperando tickets en Asignados(0)
+      if (!isDisabledInThisTab && isScanningQueue && !isPausedForQuestion && !isSendingLock && !isStepInProgress && msg.tickets.length > 0) {
+        clearTimeout(scannerLoopTimeout);
+        scannerLoopTimeout = setTimeout(() => {
+          if (isScanningQueue && !isPausedForQuestion && !isSendingLock && !isStepInProgress) {
+            runNextScannerStep();
+          }
+        }, 120);
+      }
+    }
+
+    // 3. Historial de mensajes de la conversación (UFN_CONVERSATION_SEL_INTERACTION)
+    if (msg.type === 'INTERACTIONS' && msg.conversationid && Array.isArray(msg.interactions)) {
+      apiInteractionsByConvId.set(Number(msg.conversationid), msg.interactions);
+    }
+
+    // 4. Datos completos de la persona y variablecontext (incluye useranswer con SOT y Submotivo)
+    if (msg.type === 'PERSON_CONTEXT' && msg.person) {
+      const p = msg.person;
+      const tNum = String(p.ticketnum || p.variablecontext?.ticketnum || '').trim();
+      const cId = Number(p.variablecontext?.conversationid || 0);
+      if (tNum) {
+        apiPersonByTicketNum.set(tNum, p);
+      }
+      if (tNum && cId && !apiTicketsByTicketNum.has(tNum)) {
+        const synthesized = {
+          conversationid: cId,
+          ticketnum: tNum,
+          personid: Number(p.personid || p.variablecontext?.personid),
+          communicationchannelid: Number(p.lastcommunicationchannelid || p.variablecontext?.communicationchannelid || 64),
+          personcommunicationchannel: String(p.variablecontext?.personcommunicationchannel || ''),
+          communicationchannelsite: String(p.variablecontext?.communicationchannelsite || '51915021111'),
+          communicationchanneltype: 'WHAL',
+          postexternalid: null
+        };
+        apiTicketsByTicketNum.set(tNum, synthesized);
+        apiTicketsByConvId.set(cId, synthesized);
+      }
+    }
+  });
+
+  function getActiveTicketMeta(explicitTicketNum = null) {
+    const tNum = explicitTicketNum || getCurrentLaraigoTicketNumber();
+    if (tNum && apiTicketsByTicketNum.has(tNum)) {
+      return apiTicketsByTicketNum.get(tNum);
+    }
+    if (tNum && apiPersonByTicketNum.has(tNum)) {
+      const p = apiPersonByTicketNum.get(tNum);
+      const vc = p.variablecontext || {};
+      if (vc.conversationid && (p.personid || vc.personid)) {
+        return {
+          conversationid: Number(vc.conversationid),
+          ticketnum: tNum,
+          personid: Number(p.personid || vc.personid),
+          communicationchannelid: Number(p.lastcommunicationchannelid || vc.communicationchannelid || 64),
+          personcommunicationchannel: String(vc.personcommunicationchannel || ''),
+          communicationchannelsite: String(vc.communicationchannelsite || '51915021111'),
+          communicationchanneltype: 'WHAL',
+          postexternalid: null
+        };
+      }
+    }
+    if (apiTicketsByTicketNum.size === 1) {
+      return Array.from(apiTicketsByTicketNum.values())[0];
+    }
+    return null;
+  }
+
+  function getApiCollectedTextForTicket(explicitTicketNum = null) {
+    const tNum = explicitTicketNum || getCurrentLaraigoTicketNumber();
+    const meta = getActiveTicketMeta(tNum);
+    const person = tNum ? apiPersonByTicketNum.get(tNum) : null;
+    let combined = '';
+
+    // useranswer en variablecontext trae siempre la plantilla completa con SOT y Submotivo sin scrollear
+    if (person && person.variablecontext && person.variablecontext.useranswer) {
+      combined += '\n' + person.variablecontext.useranswer;
+    }
+
+    const convId = meta?.conversationid || Number(person?.variablecontext?.conversationid || 0);
+    if (convId && apiInteractionsByConvId.has(convId)) {
+      const interactions = apiInteractionsByConvId.get(convId) || [];
+      for (const item of interactions) {
+        if (item && item.interactiontype === 'text' && item.interactiontext && item.usertype !== 'BOT') {
+          combined += '\n' + item.interactiontext;
+        }
+      }
+    }
+
+    return combined;
+  }
+
+  function sendMessageViaLaraigoApi(messageText, explicitTicketMeta = null, isFirstReply = false) {
+    const ticketMeta = explicitTicketMeta || getActiveTicketMeta();
+    if (!ticketMeta || !ticketMeta.conversationid || !ticketMeta.personid) {
+      return Promise.resolve(false);
+    }
+
+    const reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingBridgeRequests.delete(reqId);
+        resolve(false);
+      }, 3200);
+
+      pendingBridgeRequests.set(reqId, (res) => {
+        clearTimeout(timer);
+        resolve(Boolean(res && res.ok));
+      });
+
+      window.postMessage({
+        source: 'LARAIGO_CONTENT',
+        action: 'SEND_API_REPLY',
+        requestId: reqId,
+        payload: {
+          ticketMeta,
+          messageText,
+          isFirstReply
+        }
+      }, '*');
+    });
+  }
+
+  // ==============================================================
   // DELIMITADOR GEOMÉTRICO DEL PANEL IZQUIERDO ("Asignados") Y CHAT CENTRAL
   // ==============================================================
   function isElementInOurOverlay(el) {
@@ -476,14 +657,17 @@
   }
 
   function getCentralChatOnlyText(extraCollectedText = '') {
+    const apiText = getApiCollectedTextForTicket();
+    const baseText = (extraCollectedText || '') + (apiText ? '\n' + apiText : '');
+
     const scrollContainer = findChatMessagesScrollContainer();
     if (scrollContainer) {
-      return (extraCollectedText || '') + '\n' + (scrollContainer.innerText || '');
+      return baseText + '\n' + (scrollContainer.innerText || '');
     }
 
     const { minLeft, maxRight } = getChatColumnBounds();
     const nodes = Array.from(document.querySelectorAll('div, p, span'));
-    let chatText = extraCollectedText || '';
+    let chatText = baseText;
 
     for (const node of nodes) {
       if (isElementInOurOverlay(node)) continue;
@@ -906,10 +1090,16 @@
     }
   }
 
-  // Pegar y enviar con verificación real de vaciado de la caja y hasta 4 reintentos automáticos
+  // Pegar y enviar con verificación real de vaciado de la caja + respaldo directo por API (/api/ticket/reply)
   async function pasteAndSendSingleMessage(text, callback) {
     const initialTarget = await waitForChatInputReady(2800);
     if (!initialTarget) {
+      // Si la caja no está en el DOM, intentar envío directo por API
+      const apiSent = await sendMessageViaLaraigoApi(text);
+      if (apiSent) {
+        if (callback) callback(true);
+        return true;
+      }
       showToast("⚠️ No se encontró la caja de chat habilitada", "warning");
       if (callback) callback(false);
       return false;
@@ -953,7 +1143,15 @@
         }
       }
 
-      // 3. En intentos >= 2, probar clic por coordenadas a la derecha de la caja de texto (donde suele estar el ícono de avión de papel)
+      // 3. Respaldo directo por API POST /api/ticket/reply si el DOM no vació la caja
+      const apiSent = await sendMessageViaLaraigoApi(text);
+      if (apiSent) {
+        setInputValue(target, '');
+        if (callback) callback(true);
+        return true;
+      }
+
+      // 4. En intentos >= 2, probar clic por coordenadas a la derecha de la caja de texto
       if (attempt >= 2) {
         const rect = target.element.getBoundingClientRect();
         const centerY = rect.top + rect.height / 2;
@@ -1218,7 +1416,8 @@
       '[class*="message"], [class*="bubble"], [class*="chat"], p, div, span'
     );
 
-    let combinedChatText = extraCollectedText || '';
+    const apiText = getApiCollectedTextForTicket();
+    let combinedChatText = (apiText ? apiText + '\n' : '') + (extraCollectedText || '');
     for (const node of candidateNodes) {
       if (isElementInOurOverlay(node)) continue;
       if (node.offsetParent === null) continue;
@@ -1256,6 +1455,22 @@
   }
 
   function doesCurrentChatAlreadyHaveGreeting() {
+    const currentTkt = getCurrentLaraigoTicketNumber();
+    if (currentTkt && apiGreetedTickets.has(currentTkt)) {
+      return true;
+    }
+
+    const meta = getActiveTicketMeta(currentTkt);
+    if (meta && meta.conversationid && apiInteractionsByConvId.has(Number(meta.conversationid))) {
+      const interactions = apiInteractionsByConvId.get(Number(meta.conversationid)) || [];
+      for (const item of interactions) {
+        const iText = normalizeText(item.interactiontext || '');
+        if (iText.includes("hola tecnico, procederemos con la atencion")) {
+          return true;
+        }
+      }
+    }
+
     const bubbles = getCentralChatBubbleNodes();
     for (const msg of bubbles) {
       const text = normalizeText(msg.innerText || '');
