@@ -271,12 +271,10 @@
       }
       multiPayload.push(q);
     } else {
-      // Enviar variantes estándar para asegurar respuesta incluso antes de que el usuario abra algún ticket
       multiPayload.push({
         method: 'UFN_CONVERSATION_SEL_INTERACTION',
         key: `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`,
         parameters: {
-          p_conversationid: Number(conversationid),
           conversationid: Number(conversationid)
         }
       });
@@ -288,7 +286,7 @@
         pq.key = 'UFN_CONVERSATION_PERSON_SEL';
         if (pq.parameters) {
           for (const k of Object.keys(pq.parameters)) {
-            if (k.toLowerCase().includes('personid')) pq.parameters[k] = Number(personid);
+            if (k.toLowerCase().includes('person')) pq.parameters[k] = Number(personid);
             if (k.toLowerCase().includes('conversation')) pq.parameters[k] = Number(conversationid);
           }
         }
@@ -298,10 +296,8 @@
           method: 'UFN_CONVERSATION_PERSON_SEL',
           key: 'UFN_CONVERSATION_PERSON_SEL',
           parameters: {
-            p_personid: Number(personid),
-            personid: Number(personid),
-            p_conversationid: Number(conversationid),
-            conversationid: Number(conversationid)
+            conversationid: Number(conversationid),
+            personid: Number(personid)
           }
         });
       }

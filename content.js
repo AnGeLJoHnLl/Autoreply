@@ -118,7 +118,7 @@
     return { answered: false };
   }
 
-  let isScanningQueue = false;
+  let isScanningQueue = !isDisabledInThisTab;
   let isPausedForQuestion = false;
   let scannerLoopTimeout = null;
   let currentTicketIndex = 0;
@@ -2198,7 +2198,10 @@
       if (miniPill) miniPill.style.display = 'none';
       if (mainWidget) mainWidget.style.display = 'block';
       startManualTicketMonitor();
-      showToast("🟢 Activo en esta pestaña", "success");
+      if (!isScanningQueue) {
+        toggleScanner();
+      }
+      showToast("🟢 Activo en esta pestaña (Auto-atención 2° plano activa)", "success");
     }
   }
 
@@ -2315,11 +2318,11 @@
 
         <!-- Control de Auto-Atención en 2° Plano (Sin Scroll ni Cambio de Chat) -->
         <div class="lc-scanner-panel">
-          <button id="lc-btn-scanner" class="lc-btn-scanner">
-            ▶️ Auto-Atender en 2° Plano (Sin cambiar de chat)
+          <button id="lc-btn-scanner" class="lc-btn-scanner ${isScanningQueue ? 'active' : ''}">
+            ${isScanningQueue ? '⏹️ Pausar Auto-Atención en 2° Plano' : '▶️ Auto-Atender en 2° Plano (Sin cambiar de chat)'}
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            Responde por API en 2° plano ➔ Saludo (0s) ➔ (5s) ➔ 2° Respuesta (Sin scroll)
+            ${isScanningQueue ? 'Activo en 2° plano: responde sin cambiar de ticket ni scrollear...' : 'Responde por API en 2° plano ➔ Saludo (0s) ➔ (5s) ➔ 2° Respuesta (Sin scroll)'}
           </div>
         </div>
 
@@ -2352,6 +2355,10 @@
 
     if (!isDisabledInThisTab) {
       startManualTicketMonitor();
+      if (isScanningQueue) {
+        startInstantInboxArrivalWatcher();
+        runNextScannerStep();
+      }
     }
   }
 
