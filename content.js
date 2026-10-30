@@ -1,33 +1,22 @@
-// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro
-// Flujo completo inteligente por Submotivo + Analizador de Imágenes, Videos, Cintillos y Texto:
-// 1. Activaciones: Saludo -> Si hay captura App TOA (ignora fotos de equipo): "un momento" | Si no: "enviar error de toa"
-// 2. Reenvío de señal: Saludo -> Si hay captura App TOA (ignora fotos de equipo): "un momento" | Si no: "enviar captura de reenvio desde su toa"
-// 3. Registro de mesh: Saludo -> Si envía imagen: "Un momento" | Si no hay imagen: "Enviar imagen del repetidor"
-// 4. Consulta de cintillos: Saludo ->
-//    - Si envía números de cintillos (ej. 6273351...) y NO hay imagen: "Enviar captura de imagen de Fat/Tap"
-//    - Si hay solo imagen y NO hay números de cintillos: "Enviar cintillos"
-//    - Si NO envía ni imagen ni cintillos: "Enviar captura de imagen de Fat/Tap y cintillos"
-//    - Si envió ambos (imagen + cintillos): "Un momento"
-// 5. SOT de manto: Saludo -> Si hay video, imagen o texto explicando motivo: "Se revisa" | Si no hay nada: "Enviar motivo de sot de manto"
-// 6. Derivación a PEXT: Saludo -> Si se ven imágenes/videos: "Se revisa" | Si no hay nada: "Enviar evidencias porfavor"
+// Laraigo Auto-Reply Copilot - Especial Soporte Técnico Claro (Versión Auditada)
+// Flujo de Tiempo Exacto:
+//   1° INMEDIATO (0s): Envía el saludo "Hola Técnico, Procederemos con la atención"
+//   2° ESPERA DE 5 SEGUNDOS: Da 5s para que terminen de caer fotos, cintillos o textos del técnico
+//   3° EVALUACIÓN PROFUNDA DEL CHAT + AUTO-SCROLL: Analiza Submotivo + Evidencias reales del chat central y envía el 2° mensaje
 
 (function () {
   'use strict';
 
   const BASE_GREETING = "Hola Técnico, Procederemos con la atención";
+  const SECOND_MESSAGE_DELAY_MS = 5000; // 5 segundos de espera antes del 2° mensaje
 
+  // Orden estratégico: los más específicos primero (ej. "mesh" antes de "activaciones" por si dice "Activación de Mesh")
   const SUBMOTIVO_MAP = [
     {
       id: "reenvio",
       name: "Reenvío de señal",
       keywords: ["reenvio"],
       defaultQuestion: "enviar captura de reenvio desde su toa"
-    },
-    {
-      id: "activaciones",
-      name: "Activaciones",
-      keywords: ["activacion", "activar"],
-      defaultQuestion: "enviar error de toa"
     },
     {
       id: "cintillos",
@@ -52,6 +41,12 @@
       name: "Derivación a PEXT",
       keywords: ["pext", "derivacion", "planta externa"],
       defaultQuestion: "Enviar evidencias porfavor"
+    },
+    {
+      id: "activaciones",
+      name: "Activaciones",
+      keywords: ["activacion", "activar"],
+      defaultQuestion: "enviar error de toa"
     }
   ];
 
@@ -129,26 +124,85 @@
   const imageClassificationCache = new Map();
 
   // ==============================================================
-  // AUTO-SCROLL DENTRO DE LA CONVERSACIÓN DEL CHAT
+  // DELIMITADOR GEOMÉTRICO DEL ÁREA CENTRAL DEL CHAT EN LARAIGO
+  // Evita confundir el chat con la columna izquierda (Asignados) o derecha (Información CRM)
   // ==============================================================
-  function findChatMessagesScrollContainer() {
+  function getChatColumnBounds() {
+    let minLeft = 120;
+    let maxRight = window.innerWidth;
+
+    // 1. Límite izquierdo: borde derecho de la pestaña "Asignados(X)" / "Cerrados"
+    const allEls = Array.from(document.querySelectorAll('div, span, a, button'));
+    for (const el of allEls) {
+      const txt = (el.innerText || '').trim();
+      if (/^Asignados\s*\(\d+\)$/i.test(txt)) {
+        // Buscar el contenedor de la lista izquierda
+        let col = el.parentElement;
+        for (let i = 0; i < 5; i++) {
+          if (!col || col === document.body) break;
+          const r = col.getBoundingClientRect();
+          if (r.width >= 140 && r.width <= 380 && r.height > 200) {
+            minLeft = Math.max(minLeft, r.right - 10);
+            break;
+          }
+          col = col.parentElement;
+        }
+        break;
+      }
+    }
+
+    // 2. Límite derecho: borde izquierdo del panel "Información" / "Variables" / botón "Vincular"
+    for (const el of allEls) {
+      const txt = (el.innerText || '').trim();
+      if (txt === 'Vincular' || txt === 'Información' || txt === 'Variables') {
+        const r = el.getBoundingClientRect();
+        if (r.left > window.innerWidth * 0.45) {
+          let panel = el.parentElement;
+          for (let i = 0; i < 6; i++) {
+            if (!panel || panel === document.body) break;
+            const pr = panel.getBoundingClientRect();
+            if (pr.height > 250 && pr.left > minLeft + 150) {
+              maxRight = Math.min(maxRight, pr.left + 10);
+              break;
+            }
+            panel = panel.parentElement;
+          }
+        }
+      }
+    }
+
+    return { minLeft, maxRight };
+  }
+
+  function isElementInOurOverlay(el) {
+    if (!el) return false;
     const widget = document.getElementById('laraigo-copilot-container');
+    const pill = document.getElementById('laraigo-disabled-pill');
+    const toast = document.getElementById('lc-toast');
+    if (widget && widget.contains(el)) return true;
+    if (pill && pill.contains(el)) return true;
+    if (toast && toast.contains(el)) return true;
+    return false;
+  }
+
+  function findChatMessagesScrollContainer() {
+    const { minLeft, maxRight } = getChatColumnBounds();
     const allDivs = Array.from(document.querySelectorAll('div'));
 
     let bestCandidate = null;
     let maxScore = 0;
 
     for (const div of allDivs) {
-      if (widget && widget.contains(div)) continue;
+      if (isElementInOurOverlay(div)) continue;
       if (div.offsetParent === null) continue;
+
+      const rect = div.getBoundingClientRect();
+      if (rect.left < minLeft - 30 || rect.right > maxRight + 40) continue;
+      if (div.clientHeight < 140 || div.clientWidth < 160) continue;
 
       const style = window.getComputedStyle(div);
       const overflowY = style.overflowY;
-      if (overflowY !== 'auto' && overflowY !== 'scroll') continue;
-      if (div.clientHeight < 150 || div.clientWidth < 180) continue;
-
-      const rect = div.getBoundingClientRect();
-      if (rect.left < 100) continue;
+      const isScrollable = (overflowY === 'auto' || overflowY === 'scroll');
 
       const text = (div.innerText || '').toLowerCase();
       const hasChatIndicators =
@@ -156,10 +210,11 @@
         text.includes('submotivo:') ||
         text.includes('hola, soy el') ||
         text.includes('hola técnico') ||
+        text.includes('asignado a holding') ||
         div.querySelectorAll('img, video').length > 0;
 
-      if (hasChatIndicators && div.scrollHeight >= div.clientHeight) {
-        const score = div.clientHeight * (div.scrollHeight > div.clientHeight ? 2 : 1);
+      if (hasChatIndicators && isScrollable) {
+        const score = div.clientHeight * (div.scrollHeight > div.clientHeight ? 3 : 1);
         if (score > maxScore) {
           maxScore = score;
           bestCandidate = div;
@@ -170,21 +225,24 @@
     return bestCandidate;
   }
 
+  // Hace scroll arriba -> medio -> abajo en el chat abierto para cargar todo el historial e imágenes
   async function scrollChatAndCollectFullData() {
     const scrollContainer = findChatMessagesScrollContainer();
     let collectedText = '';
 
-    if (scrollContainer && scrollContainer.scrollHeight > scrollContainer.clientHeight + 30) {
-      scrollContainer.scrollTop = 0;
-      await sleep(350);
-      collectedText += '\n' + (scrollContainer.innerText || '');
+    if (scrollContainer) {
+      if (scrollContainer.scrollHeight > scrollContainer.clientHeight + 20) {
+        scrollContainer.scrollTop = 0;
+        await sleep(320);
+        collectedText += '\n' + (scrollContainer.innerText || '');
 
-      scrollContainer.scrollTop = Math.floor(scrollContainer.scrollHeight / 2);
-      await sleep(250);
-      collectedText += '\n' + (scrollContainer.innerText || '');
+        scrollContainer.scrollTop = Math.floor(scrollContainer.scrollHeight / 2);
+        await sleep(220);
+        collectedText += '\n' + (scrollContainer.innerText || '');
 
-      scrollContainer.scrollTop = scrollContainer.scrollHeight;
-      await sleep(350);
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        await sleep(320);
+      }
       collectedText += '\n' + (scrollContainer.innerText || '');
     }
 
@@ -198,29 +256,49 @@
   // ANALIZADOR DE IMÁGENES, VIDEOS, NÚMEROS DE CINTILLOS Y TEXTO
   // ==============================================================
   function getChatAttachmentImages() {
-    const widget = document.getElementById('laraigo-copilot-container');
+    const { minLeft, maxRight } = getChatColumnBounds();
     const allImgs = Array.from(document.querySelectorAll('img'));
 
     return allImgs.filter(img => {
-      if (widget && widget.contains(img)) return false;
+      if (isElementInOurOverlay(img)) return false;
       if (img.offsetParent === null) return false;
       const rect = img.getBoundingClientRect();
-      // Excluir avatares de usuario en panel derecho (perfil grande circular) o íconos pequeños
+      // Debe estar dentro de la columna central del chat (no en la columna derecha de perfil ni izquierda)
+      if (rect.left < minLeft - 20 || rect.left > maxRight - 30) return false;
+      // Excluir íconos y avatares (< 95px)
       if (rect.width < 95 || rect.height < 95) return false;
       const src = (img.src || '').toLowerCase();
       if (!src || src.includes('avatar') || src.includes('emoji') || src.includes('logo') || src.includes('profile')) return false;
-      // Excluir imágenes que estén en el panel derecho de Información del contacto
-      const rightInfoPanel = img.closest('[class*="info"], [class*="profile"], [class*="contact-detail"]');
-      if (rightInfoPanel) return false;
       return true;
     });
   }
 
+  // Esperar hasta 1.5s si alguna imagen del chat todavía está descargándose
+  async function waitForChatImagesToLoad(imgs, maxWaitMs = 1500) {
+    const pending = imgs.filter(img => !img.complete || img.naturalWidth === 0);
+    if (pending.length === 0) return;
+
+    await Promise.race([
+      Promise.all(
+        pending.map(img => new Promise(res => {
+          img.addEventListener('load', res, { once: true });
+          img.addEventListener('error', res, { once: true });
+        }))
+      ),
+      sleep(maxWaitMs)
+    ]);
+  }
+
   function hasVideoInChat() {
-    const widget = document.getElementById('laraigo-copilot-container');
-    const videos = Array.from(document.querySelectorAll('video, a[href*=".mp4"], a[href*=".mov"], [class*="video-player"], [class*="video_message"]')).filter(
-      el => (!widget || !widget.contains(el)) && el.offsetParent !== null
-    );
+    const { minLeft, maxRight } = getChatColumnBounds();
+    const videos = Array.from(
+      document.querySelectorAll('video, a[href*=".mp4"], a[href*=".mov"], a[href*=".3gp"], [class*="video-player"], [class*="video_message"]')
+    ).filter(el => {
+      if (isElementInOurOverlay(el)) return false;
+      if (el.offsetParent === null) return false;
+      const r = el.getBoundingClientRect();
+      return r.left >= minLeft - 20 && r.left <= maxRight;
+    });
     return videos.length > 0;
   }
 
@@ -336,23 +414,44 @@
     });
   }
 
-  // Analiza los mensajes adicionales del técnico (números de cintillos, explicaciones de SOT de manto, etc.)
-  function analyzeTechnicianExtraText(detected, extraCollectedText = '') {
-    const widget = document.getElementById('laraigo-copilot-container');
+  // Obtiene únicamente el texto dentro de la columna central del chat (nunca del panel derecho ni izquierdo)
+  function getCentralChatOnlyText(extraCollectedText = '') {
     const scrollContainer = findChatMessagesScrollContainer();
-    const rawChatText = (extraCollectedText || '') + '\n' + (scrollContainer ? scrollContainer.innerText : document.body.innerText || '');
+    if (scrollContainer) {
+      return (extraCollectedText || '') + '\n' + (scrollContainer.innerText || '');
+    }
+
+    const { minLeft, maxRight } = getChatColumnBounds();
+    const nodes = Array.from(document.querySelectorAll('div, p, span'));
+    let chatText = extraCollectedText || '';
+
+    for (const node of nodes) {
+      if (isElementInOurOverlay(node)) continue;
+      if (node.offsetParent === null) continue;
+      if (node.children.length > 4) continue;
+      const r = node.getBoundingClientRect();
+      // Solo burbujas en el centro (debajo de cabecera Ticket y encima de barra de escribir)
+      if (r.left >= minLeft && r.right <= maxRight && r.top > 95 && r.bottom < window.innerHeight - 40) {
+        const t = (node.innerText || '').trim();
+        if (t) chatText += '\n' + t;
+      }
+    }
+
+    return chatText;
+  }
+
+  function analyzeTechnicianExtraText(detected, extraCollectedText = '') {
+    const rawChatText = getCentralChatOnlyText(extraCollectedText);
 
     // Limpiar el texto de bloques del sistema, plantilla inicial y mensajes del asesor
     let cleaned = rawChatText
-      // Quitar el bloque de plantilla de ingreso "Hola, soy el técnico ... Submotivo: <linea>"
       .replace(/Hola,\s*soy\s*el\s*t[eé]cnico[\s\S]*?Submotivo\s*:\s*[^\r\n]+/gi, ' ')
-      // Quitar mensajes automáticos del sistema Laraigo
       .replace(/Te estamos contactando con un asesor especializado[^\r\n]*/gi, ' ')
       .replace(/ASIGNADO A HOLDING[^\r\n]*/gi, ' ')
       .replace(/REASIGNADO DE HOLDING[^\r\n]*/gi, ' ')
       .replace(/MENSAJE ENTREGADO[^\r\n]*/gi, ' ')
       .replace(/Esta conversaci[oó]n se encuentra bloqueada[^\r\n]*/gi, ' ')
-      // Quitar mensajes nuestros como asesor
+      .replace(/Ticket\s*:\s*\d+/gi, ' ')
       .replace(/Hola T[eé]cnico,\s*Procederemos con la atenci[oó]n\.?/gi, ' ')
       .replace(/enviar error de toa/gi, ' ')
       .replace(/enviar captura de reenvio desde su toa/gi, ' ')
@@ -362,44 +461,46 @@
       .replace(/enviar imagen del repetidor/gi, ' ')
       .replace(/enviar motivo de sot de manto/gi, ' ')
       .replace(/enviar evidencias porfavor/gi, ' ')
-      // Quitar horas tipo "10:23" o "14:32"
+      .replace(/un momento/gi, ' ')
+      .replace(/se revisa/gi, ' ')
       .replace(/\b\d{1,2}:\d{2}\b/g, ' ');
 
     const sotStr = detected?.sot ? String(detected.sot) : '';
     const ticketStr = detected?.ticketNum ? String(detected.ticketNum) : '';
 
     // 1. Detectar números de cintillos (ej. 6273351, 8041438, 6776329...)
-    // Los cintillos suelen ser números de 6 a 8 dígitos (excluyendo SOT, N° de Ticket y celulares de 9 dígitos que empiezan con 9)
     const numberMatches = cleaned.match(/\b\d{6,9}\b/g) || [];
-    const cintilloNumbers = numberMatches.filter(num => {
-      if (num === sotStr || num === ticketStr) return false;
-      // Excluir celulares peruanos de 9 dígitos que empiezan en 9 (ej. 924356406)
-      if (num.length === 9 && num.startsWith('9')) return false;
-      return true;
-    });
+    const uniqueCintillos = new Set(
+      numberMatches.filter(num => {
+        if (num === sotStr || num === ticketStr) return false;
+        // Excluir teléfonos de 9 dígitos que empiezan con 9
+        if (num.length === 9 && num.startsWith('9')) return false;
+        return true;
+      })
+    );
 
-    const hasCintillosNumbers = cintilloNumbers.length >= 1;
+    const hasCintillosNumbers = uniqueCintillos.size >= 1;
 
     // 2. Detectar si el técnico escribió texto explicativo (para SOT de manto)
-    // Quitar números sueltos y saludos cortos genéricos ("hola", "buenas tardes", "buenos dias")
     const textWithoutNumbers = cleaned
       .replace(/\b\d+\b/g, ' ')
-      .replace(/\b(hola|buenas|tardes|dias|noches|buen|dia|por|favor|apoyo|gracias|estimado|asesor)\b/gi, ' ')
+      .replace(/\b(hola|buenas|tardes|dias|noches|buen|dia|por|favor|apoyo|gracias|estimado|asesor|con|la|el|de|en|su|para|activacion|consulta|cintillos|reenvio|mesh|manto|pext|text)\b/gi, ' ')
       .replace(/[^\wáéíóúñÁÉÍÓÚÑ]+/g, ' ')
       .trim();
 
-    // Si quedan palabras con sentido (al menos 6 letras en total), hay texto explicando el motivo
-    const hasExplanationText = textWithoutNumbers.length >= 6;
+    const hasExplanationText = textWithoutNumbers.length >= 8;
 
     return {
       hasCintillosNumbers,
-      cintilloCount: cintilloNumbers.length,
+      cintilloCount: uniqueCintillos.size,
       hasExplanationText
     };
   }
 
   async function analyzeFullTicketContext(detected, extraCollectedText = '') {
     const imgs = getChatAttachmentImages();
+    await waitForChatImagesToLoad(imgs, 1500);
+
     let appScreenshots = 0;
     let equipmentPhotos = 0;
 
@@ -436,32 +537,24 @@
     if (!stats) return rule.defaultQuestion;
 
     switch (rule.id) {
-      // 1. ACTIVACIONES: Ignorar fotos de equipo; si hay captura de App de celular (TOA) -> "un momento", sino -> "enviar error de toa"
       case "activaciones":
         if (stats.hasAppScreenshot) {
           return "un momento";
         }
         return "enviar error de toa";
 
-      // 2. REENVÍO DE SEÑAL: Ignorar fotos de equipo; si hay captura de App de celular (TOA) -> "un momento", sino -> "enviar captura de reenvio desde su toa"
       case "reenvio":
         if (stats.hasAppScreenshot) {
           return "un momento";
         }
         return "enviar captura de reenvio desde su toa";
 
-      // 3. REGISTRO DE MESH: Si envía imagen -> "Un momento", si no hay imagen -> "Enviar imagen del repetidor"
       case "mesh":
         if (stats.hasAnyImage) {
           return "Un momento";
         }
         return "Enviar imagen del repetidor";
 
-      // 4. CONSULTA DE CINTILLOS:
-      // - Si envía números de cintillos y NO hay imagen -> "Enviar captura de imagen de Fat/Tap"
-      // - Si hay solo imagen y NO hay números de cintillos -> "Enviar cintillos"
-      // - Si NO envía nada -> "Enviar captura de imagen de Fat/Tap y cintillos"
-      // - Si ya envió ambos (imagen + cintillos) -> "Un momento"
       case "cintillos":
         if (stats.hasCintillosNumbers && !stats.hasAnyImage) {
           return "Enviar captura de imagen de Fat/Tap";
@@ -474,18 +567,12 @@
         }
         return "Enviar captura de imagen de Fat/Tap y cintillos";
 
-      // 5. SOT DE MANTO:
-      // - Si hay algún video, imagen o texto explicando -> "Se revisa"
-      // - Si no hay ningún video, imagen ni texto explicando -> "Enviar motivo de sot de manto"
       case "manto":
         if (stats.hasVideo || stats.hasAnyImage || stats.hasExplanationText) {
           return "Se revisa";
         }
         return "Enviar motivo de sot de manto";
 
-      // 6. DERIVACIÓN A PEXT:
-      // - Si se ven imágenes (o video) -> "Se revisa"
-      // - Si no hay nada -> "Enviar evidencias porfavor"
       case "pext":
         if (stats.hasAnyImage || stats.hasVideo) {
           return "Se revisa";
@@ -497,7 +584,6 @@
     }
   }
 
-  // Descripción amigable en el widget de lo que se detectó en el ticket
   function buildContextSummaryHtml(rule, stats) {
     if (!rule || !stats) return '';
 
@@ -556,11 +642,9 @@
   }
 
   function findChatInput() {
-    const widget = document.getElementById('laraigo-copilot-container');
-
     const textareas = Array.from(document.querySelectorAll('textarea'));
     for (const ta of textareas) {
-      if (widget && widget.contains(ta)) continue;
+      if (isElementInOurOverlay(ta)) continue;
       if (ta.offsetParent !== null && !ta.disabled && !ta.readOnly) {
         return { element: ta, type: 'textarea' };
       }
@@ -568,7 +652,7 @@
 
     const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
     for (const ed of editables) {
-      if (widget && widget.contains(ed)) continue;
+      if (isElementInOurOverlay(ed)) continue;
       if (ed.offsetParent !== null) {
         return { element: ed, type: 'contenteditable' };
       }
@@ -576,7 +660,7 @@
 
     const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'));
     for (const inp of inputs) {
-      if (widget && widget.contains(inp)) continue;
+      if (isElementInOurOverlay(inp)) continue;
       if (inp.offsetParent === null || inp.disabled || inp.readOnly) continue;
       const placeholder = (inp.placeholder || '').toLowerCase();
       if (placeholder.includes('mensaje') || placeholder.includes('escribe') || placeholder.includes('chat') || placeholder.includes('responder')) {
@@ -589,7 +673,6 @@
 
   function findSendButtonNearInput(inputElement) {
     if (!inputElement) return null;
-    const widget = document.getElementById('laraigo-copilot-container');
 
     let footerContainer = inputElement.parentElement;
     for (let level = 0; level < 4; level++) {
@@ -597,7 +680,7 @@
       const candidates = Array.from(
         footerContainer.querySelectorAll('button, [role="button"], a, i[class*="send"], i[class*="paper-plane"], span[class*="send"], mat-icon')
       ).filter(el => {
-        if (widget && widget.contains(el)) return false;
+        if (isElementInOurOverlay(el)) return false;
         if (el.offsetParent === null || el.disabled) return false;
         return true;
       });
@@ -626,7 +709,7 @@
       }
 
       const buttonsInRow = Array.from(footerContainer.querySelectorAll('button, [role="button"]')).filter(
-        b => (!widget || !widget.contains(b)) && b.offsetParent !== null && !b.disabled
+        b => !isElementInOurOverlay(b) && b.offsetParent !== null && !b.disabled
       );
       if (buttonsInRow.length > 0) {
         const inputRect = inputElement.getBoundingClientRect();
@@ -736,19 +819,20 @@
         }
         if (callback) callback(true);
       }, 220);
-    }, 150);
+    }, 140);
   }
 
   // ==============================================================
   // ENVÍO INTELIGENTE EN 2 PASOS:
-  // 1° Saludo ("Hola Técnico, Procederemos con la atención")
-  // 2° Respuesta dinámica según evaluación del ticket
+  // 1° INMEDIATO (0s): Manda SÍ O SÍ "Hola Técnico, Procederemos con la atención"
+  // 2° ESPERA 5 SEGUNDOS: Da tiempo a que lleguen las fotos/cintillos/mensajes del técnico
+  // 3° RE-ANALIZA EL CHAT COMPLETO y envía la 2° respuesta exacta
   // ==============================================================
   async function safeSendTwoStepSmartReply(ruleOrQuestion, detectedContext = null, force = false, onComplete = null) {
     if (isDisabledInThisTab) return false;
 
     if (isSendingLock) {
-      showToast("⏳ Envío en curso, evitando duplicado...", "warning");
+      showToast("⏳ Envío o espera de 5s en curso...", "warning");
       if (onComplete) onComplete(false);
       return false;
     }
@@ -766,69 +850,118 @@
       return false;
     }
 
-    const detected = detectedContext || scanScreenForSubmotivo();
-    const sot = detected?.sot || null;
-    const ticketNum = detected?.ticketNum || null;
-    const sig = detected?.signature || null;
+    const initialDetected = detectedContext || scanScreenForSubmotivo();
+    const initialSot = initialDetected?.sot || null;
+    const initialTicketNum = initialDetected?.ticketNum || getCurrentLaraigoTicketNumber();
+    const initialSig = initialDetected?.signature || null;
 
     if (!force) {
       if (doesCurrentChatAlreadyHaveSecondQuestion()) {
         askAgentConfirmation(
           `⚠️ Este chat ya tiene la respuesta enviada en pantalla. ¿Seguro que deseas volver a enviar?`,
-          () => safeSendTwoStepSmartReply(ruleOrQuestion, detected, true, onComplete)
+          () => safeSendTwoStepSmartReply(ruleOrQuestion, initialDetected, true, onComplete)
         );
         return false;
       }
 
-      const storageCheck = wasTicketAlreadyAnsweredInStorage(sot, ticketNum, sig);
+      const storageCheck = wasTicketAlreadyAnsweredInStorage(initialSot, initialTicketNum, initialSig);
       if (storageCheck.answered) {
         askAgentConfirmation(
           `⚠️ Filtro Anti-Duplicado: ${storageCheck.reason} ¿Deseas enviarlo de todas formas?`,
-          () => safeSendTwoStepSmartReply(ruleOrQuestion, detected, true, onComplete)
+          () => safeSendTwoStepSmartReply(ruleOrQuestion, initialDetected, true, onComplete)
         );
         return false;
       }
     }
 
+    // Activar candado durante todo el proceso (Saludo + 5 segundos de espera + 2° Mensaje)
     isSendingLock = true;
-    markTicketAsAnswered(sot, ticketNum, sig);
+    const badge = document.getElementById('lc-scanner-status');
 
     const greetingAlreadyPresent = doesCurrentChatAlreadyHaveGreeting();
-    const contextStats = await analyzeFullTicketContext(detected);
-    const secondMessageText = typeof ruleOrQuestion === 'string'
-      ? ruleOrQuestion
-      : resolveSecondMessage(ruleOrQuestion, contextStats);
 
-    if (greetingAlreadyPresent && !force) {
-      showToast(`Saludo ya presente ➔ Enviando: "${secondMessageText}"`, "info");
-      pasteAndSendSingleMessage(secondMessageText, () => {
-        showToast(`✅ Atención completada${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
-        setTimeout(() => {
-          isSendingLock = false;
-          if (onComplete) onComplete(true);
-        }, 1500);
+    // PASO 1: Enviar el saludo DE INMEDIATO (si no estaba ya en pantalla)
+    if (!greetingAlreadyPresent || force) {
+      showToast(`⚡ 1/2 Enviando saludo inmediato...`, "info");
+      if (badge) badge.innerText = `⚡ Enviando saludo inmediato...`;
+
+      const step1Success = await new Promise(resolve => {
+        pasteAndSendSingleMessage(BASE_GREETING, (ok) => resolve(ok));
       });
-      return true;
-    }
 
-    showToast(`1/2 Enviando saludo inicial...`, "info");
-    pasteAndSendSingleMessage(BASE_GREETING, (step1Ok) => {
-      if (!step1Ok) {
+      if (!step1Success) {
         isSendingLock = false;
         if (onComplete) onComplete(false);
-        return;
+        return false;
       }
+    } else {
+      showToast(`✅ Saludo ya en chat. Esperando 5s para evaluar 2° mensaje...`, "info");
+    }
 
+    // PASO 2: Esperar 5 segundos (con cuenta regresiva visual) para que terminen de llegar fotos/cintillos/textos
+    const totalSeconds = Math.round(SECOND_MESSAGE_DELAY_MS / 1000);
+    for (let remaining = totalSeconds; remaining >= 1; remaining--) {
+      if (isDisabledInThisTab) {
+        isSendingLock = false;
+        if (onComplete) onComplete(false);
+        return false;
+      }
+      if (badge) {
+        badge.innerText = `⏳ Esperando ${remaining}s para recibir mensajes/fotos del técnico...`;
+      }
+      showToast(`⏳ Esperando mensajes del técnico (${remaining}s)...`, "info");
+
+      // En el último segundo de espera, hacer scroll arriba/abajo para capturar todo lo nuevo que llegó
+      if (remaining === 1) {
+        await scrollChatAndCollectFullData();
+      } else {
+        await sleep(1000);
+      }
+    }
+
+    // Verificar que no hayamos cambiado a otro ticket distinto manualmente durante los 5 segundos
+    const currentTicketAfterWait = getCurrentLaraigoTicketNumber();
+    if (initialTicketNum && currentTicketAfterWait && initialTicketNum !== currentTicketAfterWait) {
+      showToast("⚠️ Se cambió de chat durante la espera; cancelando 2° envío", "warning");
+      isSendingLock = false;
+      if (onComplete) onComplete(false);
+      return false;
+    }
+
+    // Evaluar el contexto FRESCO después de los 5 segundos de espera
+    const freshDetected = scanScreenForSubmotivo() || initialDetected;
+    const freshStats = await analyzeFullTicketContext(freshDetected);
+    updateDetectedPreview(freshDetected, freshStats);
+
+    const activeRule = typeof ruleOrQuestion === 'object' ? ruleOrQuestion : freshDetected?.rule;
+    const secondMessageText = typeof ruleOrQuestion === 'string'
+      ? ruleOrQuestion
+      : resolveSecondMessage(activeRule, freshStats);
+
+    if (!secondMessageText) {
+      isSendingLock = false;
+      if (onComplete) onComplete(false);
+      return false;
+    }
+
+    // PASO 3: Enviar la segunda respuesta y registrar el ticket como completado
+    const finalSot = freshDetected?.sot || initialSot;
+    const finalTicket = freshDetected?.ticketNum || initialTicketNum;
+    const finalSig = freshDetected?.signature || initialSig;
+
+    markTicketAsAnswered(finalSot, finalTicket, finalSig);
+
+    if (badge) {
+      badge.innerText = `🚀 2/2 Enviando: "${secondMessageText}"`;
+    }
+    showToast(`🚀 2/2 Enviando: "${secondMessageText}"`, "info");
+
+    pasteAndSendSingleMessage(secondMessageText, () => {
+      showToast(`✅ Atención completada${finalSot ? ' (SOT ' + finalSot + ')' : ''}`, "success");
       setTimeout(() => {
-        showToast(`2/2 Enviando: "${secondMessageText}"`, "info");
-        pasteAndSendSingleMessage(secondMessageText, () => {
-          showToast(`✅ Atención enviada${sot ? ' (SOT ' + sot + ')' : ''}`, "success");
-          setTimeout(() => {
-            isSendingLock = false;
-            if (onComplete) onComplete(true);
-          }, 1500);
-        });
-      }, 1100);
+        isSendingLock = false;
+        if (onComplete) onComplete(true);
+      }, 1200);
     });
 
     return true;
@@ -921,15 +1054,17 @@
   }
 
   function scanScreenForSubmotivo(extraCollectedText = '') {
-    const widget = document.getElementById('laraigo-copilot-container');
+    const { minLeft, maxRight } = getChatColumnBounds();
     const candidateNodes = document.querySelectorAll(
       '[class*="message"], [class*="bubble"], [class*="chat"], p, div, span'
     );
 
     let combinedChatText = extraCollectedText || '';
     for (const node of candidateNodes) {
+      if (isElementInOurOverlay(node)) continue;
       if (node.offsetParent === null) continue;
-      if (widget && widget.contains(node)) continue;
+      const r = node.getBoundingClientRect();
+      if (r.left < minLeft - 30 || r.left > maxRight) continue;
       const text = node.innerText || '';
       if (/submotivo\s*:/i.test(text)) {
         combinedChatText += '\n' + text;
@@ -946,14 +1081,25 @@
   // ==========================================
   // COMPROBAR SI EL CHAT YA TIENE SALUDO O 2° RESPUESTA
   // ==========================================
-  function doesCurrentChatAlreadyHaveGreeting() {
-    const widget = document.getElementById('laraigo-copilot-container');
-    const chatContainers = Array.from(document.querySelectorAll(
+  function getCentralChatBubbleNodes() {
+    const { minLeft, maxRight } = getChatColumnBounds();
+    const candidates = Array.from(document.querySelectorAll(
       '[class*="message"], [class*="bubble"], [class*="chat-item"], div[class*="msg"], p, span'
     ));
 
-    for (const msg of chatContainers) {
-      if (widget && widget.contains(msg)) continue;
+    return candidates.filter(el => {
+      if (isElementInOurOverlay(el)) return false;
+      if (el.offsetParent === null) return false;
+      // Evitar contenedores gigantes que agrupan toda la página
+      if (el.children.length > 5) return false;
+      const r = el.getBoundingClientRect();
+      return r.left >= minLeft - 20 && r.right <= maxRight + 20 && r.top > 90;
+    });
+  }
+
+  function doesCurrentChatAlreadyHaveGreeting() {
+    const bubbles = getCentralChatBubbleNodes();
+    for (const msg of bubbles) {
       const text = normalizeText(msg.innerText || '');
       if (text.includes("hola tecnico, procederemos con la atencion")) {
         return true;
@@ -963,10 +1109,7 @@
   }
 
   function doesCurrentChatAlreadyHaveSecondQuestion() {
-    const widget = document.getElementById('laraigo-copilot-container');
-    const chatContainers = Array.from(document.querySelectorAll(
-      '[class*="message"], [class*="bubble"], [class*="chat-item"], div[class*="msg"], p, span'
-    ));
+    const bubbles = getCentralChatBubbleNodes();
 
     const secondStepPhrases = [
       "enviar error de toa",
@@ -985,8 +1128,7 @@
     let hasGreeting = false;
     let hasShortClosingReply = false;
 
-    for (const msg of chatContainers) {
-      if (widget && widget.contains(msg)) continue;
+    for (const msg of bubbles) {
       const text = normalizeText(msg.innerText || '');
       if (secondStepPhrases.some(phrase => text.includes(phrase))) {
         return true;
@@ -994,14 +1136,9 @@
       if (text.includes("hola tecnico, procederemos con la atencion")) {
         hasGreeting = true;
       }
-      if (
-        text === "un momento" ||
-        text.startsWith("un momento\n") ||
-        text.includes("\nun momento") ||
-        text === "se revisa" ||
-        text.startsWith("se revisa\n") ||
-        text.includes("\nse revisa")
-      ) {
+      // Limpiar hora final ej "un momento 14:33" -> "un momento"
+      const textNoTime = text.replace(/\b\d{1,2}:\d{2}\b/g, '').trim();
+      if (textNoTime === "un momento" || textNoTime === "se revisa") {
         hasShortClosingReply = true;
       }
     }
@@ -1046,12 +1183,10 @@
   // DETECCIÓN Y SCROLL DE LA COLUMNA "Asignados(X)" DE LARAIGO
   // ==============================================================
   function getInboxTicketElements() {
-    const widget = document.getElementById('laraigo-copilot-container');
-
     const allElements = Array.from(document.querySelectorAll('div, span, a, button, li'));
     let asignadosTabEl = null;
     for (const el of allElements) {
-      if (widget && widget.contains(el)) continue;
+      if (isElementInOurOverlay(el)) continue;
       const txt = (el.innerText || '').trim();
       if (/^Asignados\s*\(\d+\)$/i.test(txt)) {
         asignadosTabEl = el;
@@ -1077,7 +1212,7 @@
         }
 
         const candidateCards = Array.from(leftColumn.querySelectorAll('div, li, a')).filter(el => {
-          if (widget && widget.contains(el)) return false;
+          if (isElementInOurOverlay(el)) return false;
           if (el.offsetParent === null) return false;
           const r = el.getBoundingClientRect();
           if (r.top < tabRect.bottom - 2) return false;
@@ -1115,7 +1250,7 @@
 
     for (const sel of candidateSelectors) {
       const list = Array.from(document.querySelectorAll(sel)).filter(
-        el => (!widget || !widget.contains(el)) && el.offsetParent !== null
+        el => !isElementInOurOverlay(el) && el.offsetParent !== null
       );
       if (list.length > 0) {
         return list;
@@ -1155,8 +1290,8 @@
     if (isScanningQueue) {
       btn.classList.add('active');
       btn.innerText = "⏹️ Detener Escaneo de Bandeja";
-      badge.innerText = "Recorriendo Asignados y evaluando flujos...";
-      showToast("🔍 Auto-Scroll inteligente iniciado", "info");
+      badge.innerText = "1° Saludo inmediato ➔ Espera 5s ➔ 2° Respuesta...";
+      showToast("🔍 Auto-Escaneo iniciado (Saludo inmediato + 5s)", "info");
       currentTicketIndex = 0;
       runNextScannerStep();
     } else {
@@ -1172,9 +1307,9 @@
     const badge = document.getElementById('lc-scanner-status');
 
     if (tickets.length === 0) {
-      badge.innerText = "Scrolleando y revisando chat abierto actual...";
+      badge.innerText = "Revisando chat abierto actual...";
       processCurrentOpenTicket(() => {
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 3000);
+        scannerLoopTimeout = setTimeout(runNextScannerStep, 2800);
       });
       return;
     }
@@ -1182,7 +1317,7 @@
     if (currentTicketIndex >= tickets.length) {
       badge.innerText = `Ciclo completado (${tickets.length} chats). Vigilando nuevos...`;
       currentTicketIndex = 0;
-      scannerLoopTimeout = setTimeout(runNextScannerStep, 3500);
+      scannerLoopTimeout = setTimeout(runNextScannerStep, 3200);
       return;
     }
 
@@ -1196,9 +1331,9 @@
       if (!isScanningQueue || isPausedForQuestion || isDisabledInThisTab) return;
       processCurrentOpenTicket(() => {
         currentTicketIndex++;
-        scannerLoopTimeout = setTimeout(runNextScannerStep, 2200);
+        scannerLoopTimeout = setTimeout(runNextScannerStep, 1800);
       });
-    }, 1400);
+    }, 1000);
   }
 
   async function processCurrentOpenTicket(onDone) {
@@ -1211,15 +1346,19 @@
       return;
     }
 
-    badge.innerText = `↕️ Scrolleando chat para evaluar Submotivo y evidencias...`;
-    const { detected, contextStats } = await scrollChatAndCollectFullData();
-    updateDetectedPreview(detected, contextStats);
-
     if (doesCurrentChatAlreadyHaveSecondQuestion()) {
-      if (detected) markTicketAsAnswered(detected.sot, detected.ticketNum, detected.signature);
+      const d = scanScreenForSubmotivo();
+      if (d) markTicketAsAnswered(d.sot, d.ticketNum, d.signature);
       badge.innerText = `✅ Ya respondido completo en chat. Saltando...`;
       onDone();
       return;
+    }
+
+    // Lectura rápida inicial para ver si hay Submotivo visible; si no, hacer scroll rápido al tope
+    let detected = scanScreenForSubmotivo();
+    if (!detected) {
+      const scrollData = await scrollChatAndCollectFullData();
+      detected = scrollData.detected;
     }
 
     if (!detected) {
@@ -1258,8 +1397,7 @@
       return;
     }
 
-    const secondMsg = resolveSecondMessage(detected.rule, contextStats);
-    badge.innerText = `🎯 SOT ${detected.sot || ''} ➔ Enviando "${secondMsg}"...`;
+    // Envía 1° el saludo DE INMEDIATO, espera 5 segundos, evalúa todo el chat y manda el 2° mensaje
     safeSendTwoStepSmartReply(detected.rule, detected, true, () => onDone());
   }
 
@@ -1314,7 +1452,7 @@
           <div>🎯 Leído: <b>Submotivo: ${detected.rawSubmotivo}</b>${sotBadge}</div>
           ${contextSummaryHtml}
           <button id="lc-quick-send-detected" class="lc-quick-send-btn">
-            🚀 Enviar: 1° Saludo ➔ 2° "${secondMsg}"
+            🚀 1° Saludo (Inmediato) ➔ (5s) ➔ 2° "${secondMsg}"
           </button>
         </div>
       `;
@@ -1343,11 +1481,11 @@
       if (isScanningQueue || isSendingLock || isDisabledInThisTab) return;
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
-        if (isDisabledInThisTab) return;
+        if (isDisabledInThisTab || isSendingLock) return;
         const detected = scanScreenForSubmotivo();
         const contextStats = await analyzeFullTicketContext(detected);
         updateDetectedPreview(detected, contextStats);
-      }, 600);
+      }, 650);
     });
     manualObserver.observe(document.body, { childList: true, subtree: true });
   }
@@ -1470,11 +1608,11 @@
             ▶️ Auto-Escanear y Scrollear Chats
           </button>
           <div id="lc-scanner-status" class="lc-scanner-status">
-            Evalúa fotos TOA, repetidor, cintillos, videos y motivos
+            ⚡ Saludo inmediato (0s) ➔ Espera 5s por evidencias ➔ 2° Respuesta
           </div>
         </div>
 
-        <div class="lc-section-title">⚡ Submotivos Manuales (Evalúan el chat al clic)</div>
+        <div class="lc-section-title">⚡ Submotivos Manuales (Saludo 0s + 5s Espera)</div>
         <div class="lc-submotivos-grid" id="lc-submotivos-list"></div>
       </div>
     `;
