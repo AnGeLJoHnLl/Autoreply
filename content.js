@@ -135,7 +135,32 @@
   const apiInteractionsByConvId = new Map();
   const apiPersonByTicketNum = new Map();
   const apiGreetedTickets = new Set();
+  const notifiedTicketsLocalSet = new Set();
   const pendingBridgeRequests = new Map();
+
+  // Enviar notificación nativa de Windows (Punto 1) con filtro de 1 sola vez por Ticket (Punto 5)
+  function notifyNewTicketOnce(ticketNum, techName = '') {
+    if (isDisabledInThisTab) return;
+    const cleanNum = String(ticketNum || '').trim();
+    if (!cleanNum) return;
+
+    const ticketKey = `TKT_${cleanNum}`;
+    if (notifiedTicketsLocalSet.has(ticketKey)) return;
+    if (wasTicketAlreadyAnsweredInStorage(null, cleanNum, null).answered) return;
+
+    notifiedTicketsLocalSet.add(ticketKey);
+
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      try {
+        chrome.runtime.sendMessage({
+          action: "notifyNewTicket",
+          ticketKey,
+          ticketNum: cleanNum,
+          techName: String(techName || '').trim()
+        });
+      } catch (e) {}
+    }
+  }
 
   window.addEventListener('message', async (event) => {
     if (event.source !== window || !event.data || event.data.source !== 'LARAIGO_BRIDGE') return;
@@ -160,6 +185,11 @@
         const cId = Number(t.conversationid);
         apiTicketsByTicketNum.set(tNum, t);
         if (cId) apiTicketsByConvId.set(cId, t);
+
+        // Notificación nativa de Windows (1 sola vez por Ticket) apenas cae en ASIGNADO
+        if (!isDisabledInThisTab && t.status === 'ASIGNADO' && !t.lastreplyuser) {
+          notifyNewTicketOnce(tNum, t.displayname || '');
+        }
 
         // Si el Auto-Escáner está activo y cae un ticket en ASIGNADO sin respuesta del asesor (lastreplyuser === null),
         // enviamos el saludo de inmediato (0ms) directo a POST /api/ticket/reply sin esperar siquiera a que abra el chat
@@ -1865,6 +1895,10 @@
       if (badge) badge.innerText = `🛡️ Anti-duplicado: ${storageCheck.reason} Saltando...`;
       onDone();
       return;
+    }
+
+    if (detected.ticketNum || detected.sot) {
+      notifyNewTicketOnce(detected.ticketNum || detected.sot, detected.techName || '');
     }
 
     if (skippedTickets.has(detected.signature)) {

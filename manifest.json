@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Laraigo Auto-Reply Copilot",
-  "version": "1.6.0",
-  "description": "Automatización inteligente para Laraigo Inbox (Claro): lee Submotivo por API/DOM, detecta capturas TOA y responde en 2 pasos.",
+  "version": "1.7.0",
+  "description": "Automatización inteligente para Laraigo Inbox (Claro): lee Submotivo por API/DOM, notifica tickets nuevos y responde en 2 pasos.",
   "permissions": [
     "storage",
     "activeTab",
     "tabs",
-    "scripting"
+    "scripting",
+    "notifications"
   ],
   "host_permissions": [
     "*://*.laraigo.com/*",
