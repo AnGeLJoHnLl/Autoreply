@@ -97,20 +97,64 @@
     }
   });
 
-  function markTicketAsAnswered(sot, ticketNum, signature) {
+  function markTicketAsGreeted(sot, ticketNum, convId) {
+    const now = Date.now();
+    if (sot) {
+      const cleanSot = String(sot).trim();
+      if (cleanSot) answeredRegistry[`GREETED_SOT_${cleanSot}`] = answeredRegistry[`GREETED_SOT_${cleanSot}`] || now;
+    }
+    if (ticketNum) {
+      const cleanTkt = String(ticketNum).trim();
+      if (cleanTkt) {
+        apiGreetedTickets.add(cleanTkt);
+        answeredRegistry[`GREETED_TKT_${cleanTkt}`] = answeredRegistry[`GREETED_TKT_${cleanTkt}`] || now;
+      }
+    }
+    if (convId) {
+      const cleanConv = String(convId).trim();
+      if (cleanConv && cleanConv !== '0') {
+        answeredRegistry[`GREETED_CONV_${cleanConv}`] = answeredRegistry[`GREETED_CONV_${cleanConv}`] || now;
+      }
+    }
+    chrome.storage.local.set({ laraigo_answered_registry: answeredRegistry });
+  }
+
+  function wasTicketAlreadyGreeted(sot, ticketNum, convId) {
+    if (ticketNum) {
+      const cleanTkt = String(ticketNum).trim();
+      if (apiGreetedTickets.has(cleanTkt)) return true;
+      if (answeredRegistry[`GREETED_TKT_${cleanTkt}`] || answeredRegistry[`TICKET_${cleanTkt}`]) return true;
+    }
+    if (convId) {
+      const cleanConv = String(convId).trim();
+      if (answeredRegistry[`GREETED_CONV_${cleanConv}`] || answeredRegistry[`CONV_${cleanConv}`]) return true;
+    }
+    if (sot) {
+      const cleanSot = String(sot).trim();
+      if (answeredRegistry[`GREETED_SOT_${cleanSot}`] || answeredRegistry[`SOT_${cleanSot}`]) return true;
+    }
+    return false;
+  }
+
+  function markTicketAsAnswered(sot, ticketNum, signature, convId = null) {
     const now = Date.now();
     if (sot) answeredRegistry[`SOT_${sot}`] = now;
     if (ticketNum) answeredRegistry[`TICKET_${ticketNum}`] = now;
     if (signature) answeredRegistry[`SIG_${signature}`] = now;
+    if (convId) answeredRegistry[`CONV_${convId}`] = now;
+    markTicketAsGreeted(sot, ticketNum, convId);
     chrome.storage.local.set({ laraigo_answered_registry: answeredRegistry });
   }
 
-  function wasTicketAlreadyAnsweredInStorage(sot, ticketNum, signature) {
+  function wasTicketAlreadyAnsweredInStorage(sot, ticketNum, signature, convId = null) {
     if (sot && answeredRegistry[`SOT_${sot}`]) {
       return { answered: true, reason: `La SOT ${sot} ya fue respondida.` };
     }
     if (ticketNum && answeredRegistry[`TICKET_${ticketNum}`]) {
       return { answered: true, reason: `El Ticket ${ticketNum} ya fue respondido.` };
+    }
+    if (convId && answeredRegistry[`CONV_${convId}`]) {
+      return { answered: true, reason: `La conversación ${convId} ya fue respondida.` };
     }
     if (signature && answeredRegistry[`SIG_${signature}`]) {
       return { answered: true, reason: `Este ticket ya fue respondido.` };
@@ -138,6 +182,8 @@
   const backgroundTicketsInProgress = new Set();
   const notifiedTicketsLocalSet = new Set();
   const pendingBridgeRequests = new Map();
+  let lastOpenedTicketNum = null;
+  let lastOpenedConvId = null;
 
   // Enviar notificación nativa de Windows (Punto 1) con filtro de 1 sola vez por Ticket (Punto 5)
   function notifyNewTicketOnce(ticketNum, techName = '') {
@@ -209,7 +255,16 @@
 
     // 3. Historial de mensajes de la conversación (UFN_CONVERSATION_SEL_INTERACTION)
     if (msg.type === 'INTERACTIONS' && msg.conversationid && Array.isArray(msg.interactions)) {
-      apiInteractionsByConvId.set(Number(msg.conversationid), msg.interactions);
+      const cId = Number(msg.conversationid);
+      apiInteractionsByConvId.set(cId, msg.interactions);
+      lastOpenedConvId = cId;
+      const matchedTkt = apiTicketsByConvId.get(cId);
+      if (matchedTkt && matchedTkt.ticketnum) {
+        lastOpenedTicketNum = String(matchedTkt.ticketnum).trim();
+      }
+      if (doesInteractionsListHaveGreeting(msg.interactions)) {
+        markTicketAsGreeted(null, matchedTkt?.ticketnum || null, cId);
+      }
     }
 
     // 4. Datos completos de la persona y variablecontext (incluye useranswer con SOT y Submotivo)
@@ -219,6 +274,10 @@
       const cId = Number(p.variablecontext?.conversationid || 0);
       if (tNum) {
         apiPersonByTicketNum.set(tNum, p);
+        lastOpenedTicketNum = tNum;
+      }
+      if (cId) {
+        lastOpenedConvId = cId;
       }
       if (tNum && cId && !apiTicketsByTicketNum.has(tNum)) {
         const synthesized = {
@@ -1383,10 +1442,14 @@
     isSendingLock = true;
     const badge = document.getElementById('lc-scanner-status');
 
-    const greetingAlreadyPresent = doesCurrentChatAlreadyHaveGreeting();
+    const activeMeta = getActiveTicketMeta(initialTicketNum);
+    const activeConvId = activeMeta?.conversationid || lastOpenedConvId || null;
+    const greetingAlreadyPresent =
+      doesCurrentChatAlreadyHaveGreeting() ||
+      wasTicketAlreadyGreeted(initialSot, initialTicketNum, activeConvId);
 
-    // PASO 1: Enviar el saludo DE INMEDIATO (0s)
-    if (!greetingAlreadyPresent || force) {
+    // PASO 1: Enviar el saludo DE INMEDIATO (0s) SOLO si aún no fue enviado en este ticket
+    if (!greetingAlreadyPresent) {
       showToast(`⚡ 1/2 Enviando saludo inmediato...`, "info");
       if (badge) badge.innerText = `⚡ Enviando saludo inmediato...`;
 
@@ -1398,12 +1461,14 @@
         if (onComplete) onComplete(false);
         return false;
       }
+      markTicketAsGreeted(initialSot, initialTicketNum, activeConvId);
     } else {
-      showToast(`✅ Saludo ya en chat. Esperando 5s para evaluar 2° mensaje...`, "info");
+      markTicketAsGreeted(initialSot, initialTicketNum, activeConvId);
+      showToast(`✅ Saludo ya enviado previamente. Evaluando 2° mensaje...`, "info");
     }
 
-    // PASO 2: Esperar 5 segundos (con cuenta regresiva visual)
-    const totalSeconds = Math.round(SECOND_MESSAGE_DELAY_MS / 1000);
+    // PASO 2: Esperar 5 segundos (si recién se envió el saludo)
+    const totalSeconds = greetingAlreadyPresent ? 1 : Math.round(SECOND_MESSAGE_DELAY_MS / 1000);
     for (let remaining = totalSeconds; remaining >= 1; remaining--) {
       if (isDisabledInThisTab) {
         isSendingLock = false;
@@ -1456,7 +1521,7 @@
 
     const step2Success = await pasteAndSendSingleMessage(secondMessageText);
     if (step2Success) {
-      markTicketAsAnswered(finalSot, finalTicket, finalSig);
+      markTicketAsAnswered(finalSot, finalTicket, finalSig, activeConvId);
       showToast(`✅ Atención completada${finalSot ? ' (SOT ' + finalSot + ')' : ''}`, "success");
     } else {
       showToast(`⚠️ El 2° mensaje quedó en caja; verifica el envío`, "warning");
@@ -1476,7 +1541,9 @@
   function getCurrentLaraigoTicketNumber() {
     const bodyText = document.body.innerText || '';
     const match = bodyText.match(/Ticket\s*:\s*(\d{5,12})/i);
-    return match ? match[1] : null;
+    if (match) return match[1];
+    if (lastOpenedTicketNum) return lastOpenedTicketNum;
+    return null;
   }
 
   function extractSubmotivoFromText(rawText, explicitTicketNum = null) {
@@ -1608,8 +1675,12 @@
   function doesInteractionsListHaveGreeting(interactions) {
     if (!Array.isArray(interactions)) return false;
     for (const item of interactions) {
-      const iText = normalizeText(item?.interactiontext || '');
-      if (iText.includes("hola tecnico, procederemos con la atencion")) {
+      if (!item || item.interactiontype === 'LOG') continue;
+      if (item.usertype === 'ASESOR' && item.interactiontype === 'text') {
+        return true;
+      }
+      const iText = normalizeText(item.interactiontext || '');
+      if (iText.includes("hola tecnico") || iText.includes("procederemos con la atencion")) {
         return true;
       }
     }
@@ -1634,9 +1705,13 @@
 
     let hasGreeting = false;
     let hasShortClosingReply = false;
+    let advisorTextCount = 0;
 
     for (const item of interactions) {
       if (!item || item.interactiontype === 'LOG') continue;
+      if (item.usertype === 'ASESOR' && item.interactiontype === 'text') {
+        advisorTextCount++;
+      }
       const text = normalizeText(item.interactiontext || '');
       if (secondStepPhrases.some(phrase => text.includes(phrase))) {
         return true;
@@ -1650,19 +1725,27 @@
       }
     }
 
+    if (advisorTextCount >= 2) return true;
     return hasGreeting && hasShortClosingReply;
   }
 
   function doesCurrentChatAlreadyHaveGreeting() {
     const currentTkt = getCurrentLaraigoTicketNumber();
-    if (currentTkt && apiGreetedTickets.has(currentTkt)) {
+    const meta = getActiveTicketMeta(currentTkt);
+    const convId = meta?.conversationid || lastOpenedConvId || null;
+
+    if (wasTicketAlreadyGreeted(null, currentTkt, convId)) {
       return true;
     }
 
-    const meta = getActiveTicketMeta(currentTkt);
-    if (meta && meta.conversationid && apiInteractionsByConvId.has(Number(meta.conversationid))) {
-      const interactions = apiInteractionsByConvId.get(Number(meta.conversationid)) || [];
+    if (meta && meta.lastreplyuser) {
+      return true;
+    }
+
+    if (convId && apiInteractionsByConvId.has(Number(convId))) {
+      const interactions = apiInteractionsByConvId.get(Number(convId)) || [];
       if (doesInteractionsListHaveGreeting(interactions)) {
+        markTicketAsGreeted(null, currentTkt, convId);
         return true;
       }
     }
@@ -1670,7 +1753,8 @@
     const bubbles = getCentralChatBubbleNodes();
     for (const msg of bubbles) {
       const text = normalizeText(msg.innerText || '');
-      if (text.includes("hola tecnico, procederemos con la atencion")) {
+      if (text.includes("hola tecnico") || text.includes("procederemos con la atencion")) {
+        markTicketAsGreeted(null, currentTkt, convId);
         return true;
       }
     }
@@ -1866,7 +1950,7 @@
     if (!tNum || !convId) return false;
 
     if (backgroundTicketsInProgress.has(tNum)) return false;
-    if (wasTicketAlreadyAnsweredInStorage(null, tNum, null).answered) return false;
+    if (wasTicketAlreadyAnsweredInStorage(null, tNum, null, convId).answered) return false;
 
     backgroundTicketsInProgress.add(tNum);
     const badge = document.getElementById('lc-scanner-status');
@@ -1875,16 +1959,23 @@
       // Notificar en Windows al instante sin necesidad de entrar al ticket
       notifyNewTicketOnce(tNum, ticketMeta.displayname || '');
 
-      // PASO 1 RAPIDÍSIMO (0ms): Si el ticket recién cayó (lastreplyuser === null),
-      // enviamos el saludo de inmediato sin esperar ninguna consulta previa
+      // Verificar si ya fue saludado previamente (en memoria, en storage o por lastreplyuser de la API)
       let greetedNow = false;
-      if (!ticketMeta.lastreplyuser && !apiGreetedTickets.has(tNum)) {
+      const alreadyGreetedFast =
+        wasTicketAlreadyGreeted(null, tNum, convId) ||
+        Boolean(ticketMeta.lastreplyuser);
+
+      if (alreadyGreetedFast) {
+        markTicketAsGreeted(null, tNum, convId);
+      } else {
+        // PASO 1 RAPIDÍSIMO (0ms): Si el ticket recién cayó (lastreplyuser === null),
+        // enviamos el saludo de inmediato sin esperar ninguna consulta previa
         if (badge) {
           badge.innerText = `⚡ [2° Plano] Ticket #${tNum}: Enviando 1° Saludo (0s)...`;
         }
         const sentFast = await sendMessageViaLaraigoApi(BASE_GREETING, ticketMeta, true);
         if (sentFast) {
-          apiGreetedTickets.add(tNum);
+          markTicketAsGreeted(null, tNum, convId);
           greetedNow = true;
           showToast(`⚡ Ticket #${tNum}: 1° Saludo enviado en 2° plano (esperando 5s...)`, "info");
         }
@@ -1893,14 +1984,23 @@
       // Consultar historial e información del ticket en 2° plano vía API (/api/multi)
       const initFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid);
 
+      if (doesInteractionsListHaveGreeting(initFetch.interactions)) {
+        markTicketAsGreeted(null, tNum, convId);
+      }
+
       if (doesInteractionsListHaveSecondQuestion(initFetch.interactions)) {
         const dInit = scanScreenForSubmotivo('', tNum);
-        markTicketAsAnswered(dInit?.sot || null, tNum, dInit?.signature || null);
+        markTicketAsAnswered(dInit?.sot || null, tNum, dInit?.signature || null, convId);
         return true;
       }
 
       const dPre = scanScreenForSubmotivo('', tNum);
-      if (dPre && wasTicketAlreadyAnsweredInStorage(dPre.sot, tNum, dPre.signature).answered) {
+      if (dPre && dPre.sot) {
+        if (wasTicketAlreadyGreeted(dPre.sot, tNum, convId)) {
+          markTicketAsGreeted(dPre.sot, tNum, convId);
+        }
+      }
+      if (dPre && wasTicketAlreadyAnsweredInStorage(dPre.sot, tNum, dPre.signature, convId).answered) {
         return true;
       }
       if (dPre && skippedTickets.has(dPre.signature)) {
@@ -1910,7 +2010,8 @@
       // Si aún no se había enviado el saludo en el paso rápido, verificar en interacciones y enviarlo ahora
       const alreadyGreeted =
         greetedNow ||
-        apiGreetedTickets.has(tNum) ||
+        alreadyGreetedFast ||
+        wasTicketAlreadyGreeted(dPre?.sot || null, tNum, convId) ||
         doesInteractionsListHaveGreeting(initFetch.interactions);
 
       if (!alreadyGreeted) {
@@ -1919,7 +2020,7 @@
         }
         const sent1 = await sendMessageViaLaraigoApi(BASE_GREETING, ticketMeta, true);
         if (sent1) {
-          apiGreetedTickets.add(tNum);
+          markTicketAsGreeted(dPre?.sot || null, tNum, convId);
           showToast(`⚡ Ticket #${tNum}: 1° Saludo enviado en 2° plano (esperando 5s...)`, "info");
         } else {
           return false;
@@ -1934,15 +2035,44 @@
 
       if (isDisabledInThisTab || !isScanningQueue) return false;
 
-      // PASO 3: Re-consultar mensajes/adjuntos del ticket vía API tras los 5 segundos
-      const secondFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid);
+      // PASO 3: Re-consultar mensajes/adjuntos del ticket vía API tras los 5 segundos (con reintento si aún no cargó)
+      let secondFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid);
       if (doesInteractionsListHaveSecondQuestion(secondFetch.interactions)) {
         const dDone = scanScreenForSubmotivo('', tNum);
-        markTicketAsAnswered(dDone?.sot || null, tNum, dDone?.signature || null);
+        markTicketAsAnswered(dDone?.sot || null, tNum, dDone?.signature || null, convId);
         return true;
       }
 
-      const detected = scanScreenForSubmotivo('', tNum) || dPre;
+      const buildDirectText = (fetchRes) => {
+        let txt = '';
+        const vc = fetchRes?.person?.variablecontext;
+        if (vc) {
+          if (typeof vc === 'string') {
+            try {
+              const parsedVc = JSON.parse(vc);
+              if (parsedVc?.useranswer) txt += '\n' + parsedVc.useranswer;
+            } catch (e) {}
+          } else if (vc.useranswer) {
+            txt += '\n' + vc.useranswer;
+          }
+        }
+        if (Array.isArray(fetchRes?.interactions)) {
+          for (const item of fetchRes.interactions) {
+            if (item && item.interactiontype === 'text' && item.interactiontext && item.usertype !== 'BOT') {
+              txt += '\n' + item.interactiontext;
+            }
+          }
+        }
+        return txt;
+      };
+
+      let detected = scanScreenForSubmotivo(buildDirectText(secondFetch), tNum) || dPre;
+      if (!detected || !detected.rule) {
+        await sleep(1500);
+        secondFetch = await fetchConversationDetailsViaBridge(convId, ticketMeta.personid);
+        detected = scanScreenForSubmotivo(buildDirectText(secondFetch), tNum) || dPre;
+      }
+
       if (!detected || !detected.rule || detected.casuistica) {
         if (badge) {
           badge.innerText = `⚠️ Ticket #${tNum}: Casuística o sin Submotivo (${detected?.rawSubmotivo || 'revisar'})`;
@@ -1950,12 +2080,14 @@
         return false;
       }
 
-      if (wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature).answered) {
+      markTicketAsGreeted(detected.sot, tNum, convId);
+
+      if (wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature, convId).answered) {
         return true;
       }
 
       // Analizar fotos (TOA vs equipo), videos, cintillos y texto directamente desde la API en memoria
-      const finalStats = await analyzeFullTicketContext(detected, '', tNum);
+      const finalStats = await analyzeFullTicketContext(detected, buildDirectText(secondFetch), tNum);
       const secondMessageText = resolveSecondMessage(detected.rule, finalStats);
       if (!secondMessageText) return false;
 
@@ -1965,7 +2097,7 @@
 
       const sent2 = await sendMessageViaLaraigoApi(secondMessageText, ticketMeta, false);
       if (sent2) {
-        markTicketAsAnswered(detected.sot, tNum, detected.signature);
+        markTicketAsAnswered(detected.sot, tNum, detected.signature, convId);
         if (badge) {
           badge.innerText = `✅ Ticket #${tNum} (${detected.rule.name}): "${secondMessageText}" enviado sin cambiar de chat`;
         }
@@ -2193,16 +2325,17 @@
         const contextStats = await analyzeFullTicketContext(detected);
         updateDetectedPreview(detected, contextStats);
 
-        // Si el modo automático está activo y hay un ticket abierto sin responder aún,
-        // enviarlo automáticamente sin esperar a que el usuario haga clic en el botón
+        // Si el modo automático está activo y hay un ticket abierto sin responder aún:
         if (isScanningQueue && !isPausedForQuestion && detected && detected.rule && !detected.casuistica) {
-          const tNum = detected.ticketNum ? String(detected.ticketNum).trim() : null;
+          const tNum = detected.ticketNum ? String(detected.ticketNum).trim() : getCurrentLaraigoTicketNumber();
+          const openMeta = getActiveTicketMeta(tNum);
+          const convId = openMeta?.conversationid || lastOpenedConvId || null;
+
           const alreadyInDom = doesCurrentChatAlreadyHaveSecondQuestion();
-          const alreadyInStorage = wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature).answered;
-          const inBgProgress = tNum ? backgroundTicketsInProgress.has(tNum) : false;
+          const alreadyInStorage = wasTicketAlreadyAnsweredInStorage(detected.sot, tNum, detected.signature, convId).answered;
+          const inBgProgress = (tNum && backgroundTicketsInProgress.has(tNum)) || backgroundTicketsInProgress.size > 0;
 
           if (!alreadyInDom && !alreadyInStorage && !inBgProgress && !skippedTickets.has(detected.signature)) {
-            const openMeta = getActiveTicketMeta(tNum);
             if (openMeta && openMeta.conversationid && openMeta.ticketnum) {
               processTicketInBackgroundViaApi(openMeta);
             } else {

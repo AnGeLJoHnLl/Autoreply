@@ -1,10 +1,10 @@
-# Laraigo Auto-Reply Copilot (v1.9.0) - Soporte Técnicos de Campo Claro
+# Laraigo Auto-Reply Copilot (v1.9.1) - Soporte Técnicos de Campo Claro
 
 Extensión para Google Chrome / Microsoft Edge diseñada para la bandeja de atención de **Laraigo** (`https://claro.laraigo.com/message_inbox`).
 
 ---
 
-## ✨ Novedades de la versión 1.9.0
+## ✨ Novedades de la versión 1.9.1
 
 - **Atención 100% Automática sin Entrar al Ticket (2° Plano por API + Socket.IO):**
   - **No necesitas hacer clic ni entrar al ticket** para que se notifique o se responda. Puedes quedarte trabajando en tu ticket actual en la misma pestaña sin que cambie de conversación ni mueva tu scroll.

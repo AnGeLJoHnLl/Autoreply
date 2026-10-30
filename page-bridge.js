@@ -494,10 +494,11 @@
       const q = JSON.parse(JSON.stringify(learnedInteractionMethodTemplate));
       q.key = `UFN_CONVERSATION_SEL_INTERACTION_${conversationid}`;
       if (q.parameters) {
+        const paramKeys = Object.keys(q.parameters);
         let replaced = false;
-        for (const k of Object.keys(q.parameters)) {
-          if (k.toLowerCase().includes('conversation')) {
-            q.parameters[k] = Number(conversationid);
+        for (const k of paramKeys) {
+          if (k.toLowerCase().includes('conv') || paramKeys.length === 1) {
+            q.parameters[k] = typeof q.parameters[k] === 'string' ? String(conversationid) : Number(conversationid);
             replaced = true;
           }
         }
@@ -516,27 +517,21 @@
       });
     }
 
-    if (personid) {
-      if (learnedPersonMethodTemplate) {
-        const pq = JSON.parse(JSON.stringify(learnedPersonMethodTemplate));
-        pq.key = 'UFN_CONVERSATION_PERSON_SEL';
-        if (pq.parameters) {
-          for (const k of Object.keys(pq.parameters)) {
-            if (k.toLowerCase().includes('person')) pq.parameters[k] = Number(personid);
-            if (k.toLowerCase().includes('conversation')) pq.parameters[k] = Number(conversationid);
+    if (personid && learnedPersonMethodTemplate) {
+      const pq = JSON.parse(JSON.stringify(learnedPersonMethodTemplate));
+      pq.key = 'UFN_CONVERSATION_PERSON_SEL';
+      if (pq.parameters) {
+        const pKeys = Object.keys(pq.parameters);
+        for (const k of pKeys) {
+          if (k.toLowerCase().includes('person') || (pKeys.length === 1 && !k.toLowerCase().includes('conv'))) {
+            pq.parameters[k] = typeof pq.parameters[k] === 'string' ? String(personid) : Number(personid);
+          }
+          if (k.toLowerCase().includes('conv')) {
+            pq.parameters[k] = typeof pq.parameters[k] === 'string' ? String(conversationid) : Number(conversationid);
           }
         }
-        multiPayload.push(pq);
-      } else {
-        multiPayload.push({
-          method: 'UFN_CONVERSATION_PERSON_SEL',
-          key: 'UFN_CONVERSATION_PERSON_SEL',
-          parameters: {
-            conversationid: Number(conversationid),
-            personid: Number(personid)
-          }
-        });
       }
+      multiPayload.push(pq);
     }
 
     const res = await apiPostJson('/api/multi', multiPayload);
