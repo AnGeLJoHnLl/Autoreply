@@ -4,7 +4,7 @@
   position: fixed;
   bottom: 20px;
   right: 20px;
-  width: 355px;
+  width: 345px;
   background: #ffffff;
   border-radius: 12px;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.22), 0 3px 10px rgba(0, 0, 0, 0.1);
@@ -13,26 +13,54 @@
   color: #1f2937;
   z-index: 9999999;
   border: 1px solid #e5e7eb;
-  transition: all 0.25s ease-in-out;
+  transition: all 0.2s ease-in-out;
   overflow: hidden;
+}
+
+/* Pastilla discreta cuando el Copiloto está apagado en esa pestaña */
+.laraigo-disabled-pill {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  background: rgba(31, 41, 55, 0.85);
+  color: #f9fafb;
+  border: 1px solid #4b5563;
+  border-radius: 20px;
+  padding: 5px 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 9999999;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s;
+}
+
+.laraigo-disabled-pill:hover {
+  background: #da291c;
+  border-color: #b91c1c;
+  color: #ffffff;
 }
 
 .lc-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 14px;
+  padding: 9px 12px;
   background: #da291c;
   color: #ffffff;
   font-weight: 600;
   user-select: none;
+  cursor: move;
 }
 
 .lc-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .lc-badge {
@@ -47,7 +75,23 @@
 .lc-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+.lc-btn-disable-tab {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.lc-btn-disable-tab:hover {
+  background: rgba(0, 0, 0, 0.55);
 }
 
 .lc-btn-icon {
@@ -68,7 +112,7 @@
 
 .lc-body {
   padding: 12px;
-  max-height: 500px;
+  max-height: 490px;
   overflow-y: auto;
   transition: max-height 0.25s ease-out, opacity 0.2s;
 }
