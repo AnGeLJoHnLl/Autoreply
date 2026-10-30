@@ -1768,7 +1768,7 @@
   }
 
   // ==========================================
-  // ACTIVAR / DESACTIVAR EN ESTA PESTAÑA
+  // ACTIVAR / DESACTIVAR EN ESTA PESTAÑA (ACTIVO / NO ACTIVO)
   // ==========================================
   function setTabDisabledState(disabled) {
     isDisabledInThisTab = disabled;
@@ -1782,13 +1782,36 @@
       if (manualObserver) manualObserver.disconnect();
       if (mainWidget) mainWidget.style.display = 'none';
       if (miniPill) miniPill.style.display = 'flex';
-      showToast("🔌 Copiloto desactivado en esta pestaña", "warning");
+      showToast("🔴 No activo en esta pestaña", "warning");
     } else {
       if (miniPill) miniPill.style.display = 'none';
       if (mainWidget) mainWidget.style.display = 'block';
       startManualTicketMonitor();
-      showToast("⚡ Copiloto activado en esta pestaña", "success");
+      showToast("🟢 Activo en esta pestaña", "success");
     }
+  }
+
+  // Escuchar mensajes desde el Popup de la extensión (Activo / No activo por pestaña)
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message) return;
+      if (message.type === 'GET_TAB_STATUS') {
+        sendResponse({
+          active: !isDisabledInThisTab,
+          scanning: isScanningQueue
+        });
+        return true;
+      }
+      if (message.type === 'SET_TAB_STATUS') {
+        const shouldBeActive = Boolean(message.active);
+        setTabDisabledState(!shouldBeActive);
+        sendResponse({
+          active: !isDisabledInThisTab,
+          scanning: isScanningQueue
+        });
+        return true;
+      }
+    });
   }
 
   function makeWidgetDraggable(widgetEl, handleEl) {
@@ -1838,8 +1861,8 @@
     const disabledPill = document.createElement('button');
     disabledPill.id = 'laraigo-disabled-pill';
     disabledPill.className = 'laraigo-disabled-pill';
-    disabledPill.title = 'Haz clic para volver a encender el Copiloto en esta pestaña';
-    disabledPill.innerHTML = `🔌 Copiloto OFF aquí`;
+    disabledPill.title = 'Haz clic para cambiar a ACTIVO en esta pestaña';
+    disabledPill.innerHTML = `🔴 No activo`;
     disabledPill.style.display = isDisabledInThisTab ? 'flex' : 'none';
     disabledPill.addEventListener('click', () => setTabDisabledState(false));
     document.body.appendChild(disabledPill);
@@ -1855,8 +1878,8 @@
           <span class="lc-badge">CLARO</span> Copiloto Inteligente
         </div>
         <div class="lc-actions">
-          <button id="lc-btn-disable-tab" class="lc-btn-disable-tab" title="Apagar el Copiloto solo en esta pestaña/ventana">
-            🔌 Apagar aquí
+          <button id="lc-btn-disable-tab" class="lc-btn-disable-tab" title="Haz clic para cambiar a NO ACTIVO en esta pestaña">
+            🟢 Activo
           </button>
           <button id="lc-btn-collapse" class="lc-btn-icon" title="Minimizar / Maximizar">_</button>
         </div>

@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>Laraigo Auto-Reply Copilot</title>
+  <title>Laraigo Copiloto</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -11,54 +11,30 @@
       <div class="logo-badge">Laraigo</div>
       <h3>Copiloto Claro</h3>
     </div>
-    <span class="version">v1.0</span>
+    <span class="version">v1.5</span>
   </div>
 
   <div class="container">
-    <!-- Configuración del Asesor -->
     <div class="card">
-      <div class="form-group">
-        <label for="agent-name">Tu nombre de asesor:</label>
-        <input type="text" id="agent-name" placeholder="Ej: Alexander">
-        <small>Reemplaza <code>{{agente}}</code> en tus respuestas.</small>
+      <div class="section-label">Estado en esta pestaña:</div>
+
+      <div id="status-banner" class="status-banner active">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-text">ACTIVO</span>
       </div>
 
-      <div class="form-row">
-        <div>
-          <label for="auto-reply-active">Modo 100% Automático:</label>
-          <div class="toggle-switch">
-            <input type="checkbox" id="auto-reply-active">
-            <label for="auto-reply-active" class="slider"></label>
-          </div>
-        </div>
-        <div>
-          <label for="auto-reply-delay">Demora (segundos):</label>
-          <input type="number" id="auto-reply-delay" min="1" max="10" step="0.5" value="2" style="width: 70px;">
-        </div>
+      <div class="toggle-buttons">
+        <button id="btn-set-active" class="btn-state btn-active-state selected">
+          🟢 Activo
+        </button>
+        <button id="btn-set-inactive" class="btn-state btn-inactive-state">
+          🔴 No activo
+        </button>
       </div>
-    </div>
 
-    <!-- Pestañas de gestión -->
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="templates">Plantillas Rápidas</button>
-      <button class="tab-btn" data-tab="rules">Reglas Automáticas</button>
-    </div>
-
-    <!-- Pestaña 1: Plantillas -->
-    <div id="tab-templates" class="tab-content active">
-      <div id="templates-list" class="items-list"></div>
-      <button id="btn-add-template" class="btn btn-secondary">+ Nueva Plantilla</button>
-    </div>
-
-    <!-- Pestaña 2: Reglas -->
-    <div id="tab-rules" class="tab-content">
-      <div id="rules-list" class="items-list"></div>
-      <button id="btn-add-rule" class="btn btn-secondary">+ Nueva Regla por Palabras Clave</button>
-    </div>
-
-    <div class="footer-actions">
-      <button id="btn-save" class="btn btn-primary">💾 Guardar Configuración</button>
-      <div id="save-status" class="save-status"></div>
+      <p class="hint-text" id="hint-text">
+        Este cambio solo aplica a esta pestaña/ventana.
+      </p>
     </div>
   </div>
 
